@@ -336,12 +336,16 @@ async def apple_signin(req: AppleSignInRequest):
     apple_sub = claims.get("sub")
     if not apple_sub:
         raise HTTPException(401, "No subject in token")
-    token_email = (claims.get("email") or "").lower() or None
+
+    # SECURITY FIX (SEC-001): Only trust the token's email, and only when Apple marks it verified.
+    # NEVER trust `req.email` for lookup/linking — client can spoof it to hijack another account.
+    email_verified = bool(claims.get("email_verified") in (True, "true"))
+    verified_email = (claims.get("email") or "").lower() if email_verified else None
 
     existing = await db.users.find_one({"apple_sub": apple_sub}, {"_id": 0})
-    if not existing and (req.email or token_email):
-        # Link to existing account by email if present
-        existing = await db.users.find_one({"email": (req.email or token_email or "").lower()}, {"_id": 0})
+    if not existing and verified_email:
+        # Only link to existing email/password account when Apple verified the email
+        existing = await db.users.find_one({"email": verified_email}, {"_id": 0})
         if existing:
             await db.users.update_one({"user_id": existing["user_id"]}, {"$set": {"apple_sub": apple_sub}})
             existing["apple_sub"] = apple_sub
@@ -350,10 +354,12 @@ async def apple_signin(req: AppleSignInRequest):
         user_doc = existing
     else:
         user_id = f"user_{uuid.uuid4().hex[:12]}"
+        # Only use full_name from body (display-only); email must come from verified token or fall back to relay-style
+        display_email = verified_email or f"{apple_sub[:16]}@privaterelay.appleid.com"
         user_doc = {
             "user_id": user_id,
             "apple_sub": apple_sub,
-            "email": (req.email or token_email or f"{apple_sub[:16]}@privaterelay.appleid.com").lower(),
+            "email": display_email,
             "name": req.full_name or None,
             "role": "preparer",
             "created_at": now_utc(),
@@ -361,7 +367,6 @@ async def apple_signin(req: AppleSignInRequest):
         try:
             await db.users.insert_one(dict(user_doc))
         except Exception:
-            # Race on unique email; refetch
             user_doc = await db.users.find_one({"apple_sub": apple_sub}, {"_id": 0}) or user_doc
 
     token = await create_session(user_doc["user_id"])
@@ -379,6 +384,10 @@ async def logout(authorization: Optional[str] = Header(None)):
 # ---------- Documents ----------
 DOC_TYPES = ["W-2", "1099-NEC", "1099-INT", "1099-DIV", "K-1", "Receipt", "Prior-Year Return", "Other"]
 
+# SECURITY (SEC-003): bound uploads to prevent resource exhaustion and object-key traversal via user filename
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MiB
+ALLOWED_UPLOAD_EXTS = {"pdf", "jpg", "jpeg", "png", "heic", "webp", "txt", "doc", "docx", "csv", "xls", "xlsx"}
+
 
 @api_router.post("/documents/upload", response_model=DocumentOut)
 async def upload_document(
@@ -387,9 +396,19 @@ async def upload_document(
     user=Depends(get_current_user),
 ):
     contents = await file.read()
-    ext = (file.filename.rsplit(".", 1)[-1] if "." in file.filename else "bin").lower()
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"File too large. Max {MAX_UPLOAD_BYTES // (1024*1024)} MiB.")
+    if not contents:
+        raise HTTPException(400, "Empty file.")
+
+    raw_ext = (file.filename.rsplit(".", 1)[-1] if file.filename and "." in file.filename else "bin").lower()
+    # Strip anything unsafe from the extension (no slashes, no dots, letters/digits only)
+    safe_ext = "".join(c for c in raw_ext if c.isalnum())[:8] or "bin"
+    if safe_ext not in ALLOWED_UPLOAD_EXTS:
+        raise HTTPException(400, f"Unsupported file type '{safe_ext}'. Allowed: {sorted(ALLOWED_UPLOAD_EXTS)}")
+
     document_id = uuid.uuid4().hex
-    path = f"{APP_NAME}/uploads/{user['user_id']}/{document_id}.{ext}"
+    path = f"{APP_NAME}/uploads/{user['user_id']}/{document_id}.{safe_ext}"
     try:
         await run_in_threadpool(put_object, path, contents, file.content_type or "application/octet-stream")
     except Exception as e:
@@ -401,7 +420,7 @@ async def upload_document(
         "document_id": document_id,
         "user_id": user["user_id"],
         "taxpayer_id": tp_id,
-        "filename": file.filename,
+        "filename": (file.filename or f"upload.{safe_ext}")[:256],
         "doc_type": doc_type_hint if doc_type_hint in DOC_TYPES else "Other",
         "status": "uploaded",
         "storage_path": path,
@@ -429,18 +448,12 @@ async def get_document(document_id: str, user=Depends(get_current_user)):
 
 
 @api_router.get("/documents/{document_id}/file")
-async def download_document(document_id: str, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
-    auth_token = None
-    if authorization and authorization.startswith("Bearer "):
-        auth_token = authorization.split(" ", 1)[1]
-    elif token:
-        auth_token = token
-    if not auth_token:
-        raise HTTPException(401, "No token")
-    session = await db.user_sessions.find_one({"session_token": auth_token}, {"_id": 0})
-    if not session:
-        raise HTTPException(401, "Invalid session")
-    d = await db.documents.find_one({"document_id": document_id, "user_id": session["user_id"]}, {"_id": 0})
+async def download_document(document_id: str, user=Depends(get_current_user)):
+    # SECURITY FIX (SEC-002): removed `token` query param path — tokens in URLs leak into
+    # proxy / CDN / server access logs. Only accept `Authorization: Bearer <token>` header
+    # (enforced by the get_current_user dependency).
+    tp_id = await get_active_taxpayer_id(user)
+    d = await db.documents.find_one({"document_id": document_id, "user_id": user["user_id"], "taxpayer_id": tp_id}, {"_id": 0})
     if not d or not d.get("storage_path"):
         raise HTTPException(404, "Not found")
     try:
@@ -943,6 +956,7 @@ async def set_disposition(item_id: str, req: DispositionRequest, user=Depends(ge
 
 
 # ---------- Tax Assistant Chat (grounded, refuses without authority) ----------
+MAX_CHAT_LEN = 4000  # SECURITY (SEC-003): bound LLM prompt input
 CHAT_SYSTEM = """You are TaxPilot AI Assistant. You must follow these grounding rules:
 1) Answer ONLY from generally-published IRS publications and form instructions that you can name explicitly (e.g. Pub. 17, Pub. 502, Pub. 587, Pub. 970, Schedule A Instructions, Form 1040 Instructions).
 2) If the user's question is complex, fact-dependent, or you cannot cite an authoritative source for the SPECIFIED TAX YEAR, REFUSE to give a definitive answer and instead: (a) list the facts you would need, (b) name the likely authority, (c) recommend professional review.
@@ -962,6 +976,10 @@ class ChatRequest(BaseModel):
 
 @api_router.post("/chat")
 async def tax_chat(req: ChatRequest, user=Depends(get_current_user)):
+    if not req.message or not req.message.strip():
+        raise HTTPException(400, "message required")
+    if len(req.message) > MAX_CHAT_LEN:
+        raise HTTPException(400, f"message too long. Max {MAX_CHAT_LEN} characters.")
     provider = "anthropic"
     m = req.model or "claude-sonnet-5"
     if m.startswith("gpt"): provider = "openai"

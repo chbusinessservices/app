@@ -1,0 +1,42 @@
+{
+  "summary": "Security-verification pass for the 3 audit findings (SEC-001 CRITICAL, SEC-002 MEDIUM, SEC-003 MEDIUM) plus full regression. Wrote /app/backend/tests/test_security_fixes.py (21 tests across 4 test classes) and ran the entire suite. RESULT: 75/75 pass (21 new security + 54 pre-existing regression), no code changes needed to server.py — the fixes E1 applied are correct and complete. SEC-001 verified 3 ways: (a) invalid JWT and (b) 3-segment fake JWT both return 401, and (c) STATIC CODE INSPECTION of the apple_signin function body confirms `req.email` never appears in executable code (only in the security comment), `email_verified` claim IS checked from `claims.get('email_verified')`, and email-based user lookup is gated on `if not existing and verified_email:` so an unverified/missing email cannot be used to link/hijack an existing user. SEC-002 verified: `GET /documents/{id}/file?token=<valid>` WITHOUT an Authorization header returns 401 (query-token path removed); with a valid Bearer header the endpoint returns 404 for seed docs (which have no storage_path) — proving auth passes and the code reached the file-fetch branch; a second user (User B) trying to fetch User A's doc via Bearer gets 404; and after creating+activating a spouse taxpayer, User A can no longer access their own self-taxpayer doc under the spouse context (taxpayer scoping enforced). SEC-003 uploads verified: .exe→400, .sh→400, empty file→400, 25MiB+1 byte→413, .pdf/.jpg/.xlsx→200. SEC-003 chat verified: empty→400, whitespace-only→400, 4001 chars→400, exactly 4000 chars→not-400, short valid message→200 with expected schema. Regression: signup/login, /auth/me, demo/seed, documents list+single, extraction (claude+gpt), review-queue list/acknowledge/skip, /return/status, /deductions, /refund/estimate, /potential-items (list/disposition/save_for_pro_review), /chat with tax_year, /sources (8 entries), /preferences (defaults+update+invalid_year+cpa_email), /consent/7216 (sign+revoke), /handoff/{item}/pdf, /rules/diff, /cpas (unfiltered + q=CA + name/firm/specialty), /taxpayers (lazy self + full lifecycle + all relationship types), and iter4 regression suite — ALL PASS. No frontend testing (task was backend-only per E1).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_security_fixes.py",
+    "/app/test_reports/pytest/iter5_security.xml",
+    "/app/test_reports/pytest/iter5_regression.xml"
+  ],
+  "action_items": [
+    "NONE — all 3 security fixes are correctly implemented and all prior features regress cleanly. Ready to ship.",
+    "OPTIONAL (carried over from iter4): server.py is ~1416 lines; consider splitting into routers/ (auth, documents, taxpayers, cpas, rules, handoffs, chat).",
+    "OPTIONAL (carried over): add random jti to make_session_token() to avoid same-second signup+login DuplicateKeyError.",
+    "OPTIONAL (nice-to-have): the AppleSignInRequest still declares `email: Optional[str] = None` in its Pydantic model even though the field is now unused in the handler; consider removing it from the schema to eliminate the temptation for future contributors to re-introduce req.email use, and to make the client-side contract clearer."
+  ],
+  "critical_code_review_comments": [
+    "server.py:340-351 — SEC-001 fix is correct. The comment ('NEVER trust req.email for lookup/linking') accurately describes the code below it. `email_verified` is coerced from either True or the string 'true' (defensive), and `verified_email` is None when unverified. The linking branch is guarded on `if not existing and verified_email:` so an attacker cannot supply a body email to steal an existing account. When creating a new user, the display email falls back to a privaterelay-style address derived from `apple_sub` — good.",
+    "server.py:450-463 — SEC-002 fix is correct. The endpoint signature is now `download_document(document_id: str, user=Depends(get_current_user))` — the old `token: Optional[str] = Query(None)` parameter is gone, so FastAPI has no way to accept ?token=. Auth is enforced solely by the Bearer header via `get_current_user`. Also scopes the mongo lookup by both `user_id` AND `taxpayer_id`, so a swapped active-taxpayer context 404s (verified by test_cross_taxpayer_isolation).",
+    "server.py:388-408 — SEC-003 upload fix is correct. Size check happens after reading contents into memory (acceptable at 25 MiB); empty-file check returns 400; the extension is normalised (`isalnum()[:8]`) BEFORE the allowlist check, closing tricks like 'evil.EXE ' or 'file.pdf.exe' fragments; allowlist matches the audit spec exactly.",
+    "server.py:959, 977-982 — SEC-003 chat fix is correct. Empty AND whitespace-only messages are rejected (`.strip()` check), and the 4000-char cap is enforced before the LLM call — so an attacker cannot inflate cost or exhaust context by shipping a 100KB prompt."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_security_fixes.py",
+    "/app/test_reports/iteration_5.json",
+    "/app/test_reports/pytest/iter5_security.xml",
+    "/app/test_reports/pytest/iter5_regression.xml"
+  ],
+  "success_rate": {"backend": "100% (75/75 — 21 new security + 54 regression, ~106s total)", "frontend": "N/A (backend-only task per E1)"},
+  "seed_data_creation": "Fresh users per test module (TEST_sec_*, TEST_sec2_*, TEST_iter3_*, TEST_new_*, TEST_seed_*, TEST_taxpilot_*, e2e_i4_*); /api/demo/seed used to create 4 documents on the self-taxpayer in the SEC-002 test to exercise the file-download and cross-user/cross-taxpayer scoping paths.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Security fixes are locked in. Regression matrix at /app/backend/tests/ (5 files, 75 tests). Run: `EXPO_PUBLIC_BACKEND_URL=<url> pytest /app/backend/tests/ -v -o addopts=` (serial) or the pytest.ini default (xdist -n 2 --dist loadscope). All pass in ~106s. If future work touches /auth/apple, /documents/{id}/file, /documents/upload, or /chat, re-run tests/test_security_fixes.py first — it also STATIC-INSPECTS server.py to catch a regression that only re-introduces `req.email` in the apple handler.",
+  "rca_of_issue": "No new bugs. This iteration verified 3 pre-applied fixes: (1) SEC-001 root cause was that req.email was used to look up existing accounts, allowing an attacker with any valid Apple ID token to hijack another user by supplying that user's email in the request body. Fix confirmed: verified_email now comes only from the token's `email` claim gated on `email_verified`, and req.email is not referenced in executable code. (2) SEC-002 root cause was a legacy `?token=` query parameter path on the file-download endpoint, causing bearer tokens to leak into proxy/CDN/server logs. Fix confirmed: the query-param branch has been removed from the signature; only the Authorization header is honoured, and the mongo lookup is scoped by both user_id and active taxpayer_id. (3) SEC-003 root causes were unbounded upload size, missing extension allowlist, unbounded chat message length, and no empty-input rejection. Fixes confirmed: 25 MiB cap (413), extension allowlist enforced after normalisation (400), empty upload rejection (400), empty/whitespace/>4000-char chat rejection (400)."
+}
