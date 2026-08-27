@@ -105,7 +105,6 @@ class SessionExchange(BaseModel):
 
 class AppleSignInRequest(BaseModel):
     identity_token: str
-    email: Optional[str] = None
     full_name: Optional[str] = None
 
 

@@ -1,6 +1,6 @@
 import { storage } from '@/src/utils/storage';
 
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
+const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL || 'https://mobile-app-preview-695.preview.emergentagent.com').replace(/\/+$/, '');
 const API_BASE = `${BACKEND_URL}/api`;
 
 const TOKEN_KEY = 'tp_session_token';
