@@ -1,0 +1,39 @@
+{
+  "summary": "Iteration 2 tested the 4 new compliance/safety features. Backend (pytest): added /app/backend/tests/test_new_features.py with 12 test cases across refund estimator (blocked / insufficient_data / disclaimer / persistence), potential items (catalog shape, detection flag, valid dispositions, unknown-value 400, unknown-item 404, save_for_pro_review side-effect, all 4 dispositions), and grounded chat (JSON shape, non-empty answer) — 12/12 PASSED. Regression run of pre-existing suite passed 15/16; 1 pre-existing test (login-immediately-after-signup) fails with 500 due to non-token-related backend bug (see rca_of_issue). Frontend (mobile viewport 390x844): fresh signup → dashboard shows quick actions 'Tax assistant' and 'Potential items' navigating correctly; /chat renders, sends message, receives grounded response (risk-tier pill + review-flag visible in DOM); /deductions renders disclaimer banner + 5 potential items with proper 'Detected/Not detected' + risk badges + Publication authority; expanding an item shows Review / Not applicable / Need help / Save for pro review and tapping Review persists ('Marked for review' pill appears immediately). Refund estimate card on dashboard correctly shows 'Estimate blocked' with lock icon after demo seed (2 review items open). Profile shows Compliance & Guardrails, Tax Assistant, Potential items rows; clicking Compliance & Guardrails navigates to /compliance which renders Operating Principles (6), Product boundary CAN/WON'T two-column list, and Audit posture rows. Biometric toggle correctly HIDDEN on web preview (no crash). Existing email/password auth still works. Deprecated packages: none detected; two RN-Web style deprecations (Image.resizeMode, pointerEvents) already noted in iteration_1 remain, non-blocking.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/auth/login (rapid re-login within 1s of signup)", "issue": "MongoDB DuplicateKeyError on user_sessions.session_token unique index because JWT iat/exp are second-precision and identical when signup+login run in the same second → returns 500. Fix: add jti to JWT payload OR upsert session by user_id OR catch DuplicateKeyError and return existing session token."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "global", "issues": ["React Native Web still logs 'Image style.resizeMode is deprecated' and 'props.pointerEvents is deprecated' warnings (pre-existing, non-blocking)"]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_new_features.py",
+    "/app/backend/tests/test_taxpilot_api.py",
+    "/app/test_reports/pytest/new_features.xml"
+  ],
+  "action_items": [
+    "MINOR: Fix rapid-login 500 by adding a random jti to the JWT payload in make_session_token or by upserting user_sessions on (user_id, session_token) — currently blocks a user who logs in in the same second as signup. Not user-facing today because the frontend uses the returned token from signup directly, but the regression test caught it.",
+    "OPTIONAL: Add a small refund-card visual test screenshot / testID for the blocker bullet rows (currently only the header 'Estimate blocked' is testID-covered)."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 917 lines — strongly recommend splitting into routers/ (auth, documents, review, refund, potential_items, chat) before next feature.",
+    "chat_audit + item_dispositions collections have no indexes on user_id → will slow down as data grows. Add: db.chat_audit.create_index([('user_id',1),('created_at',-1)]) and db.item_dispositions.create_index([('user_id',1),('item_id',1)], unique=True) in startup.",
+    "Refund estimator confidence_tier uses a product of all field confidences (`total_confidence *= max(0.5, c)`) which underflows very quickly — after ~10 fields it's already <0.65 (=='low') even when every field is 0.95. Consider using min() or geometric mean instead.",
+    "POTENTIAL_ITEMS_CATALOG is hardcoded in Python. Fine for MVP; recommend moving to Mongo or a JSON file so authorities can be versioned per tax year (aligns with the 'Versioned tax rules' principle in the compliance screen)."
+  ],
+  "updated_files": ["/app/backend/tests/test_new_features.py", "/app/test_reports/iteration_2.json"],
+  "success_rate": {"backend": "100% new features (12/12); 94% overall regression (15/16, 1 pre-existing rapid-login bug)", "frontend": "100% new feature flows verified"},
+  "seed_data_creation": "Per-test-run unique users (TEST_new_*, TEST_seed_*); one seeded via /api/demo/seed for potential-items detection and refund-blocked cases.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend tests live at /app/backend/tests/test_new_features.py — run with `EXPO_PUBLIC_BACKEND_URL=<url> pytest /app/backend/tests/test_new_features.py -o addopts='' -v`. Env var name is EXPO_PUBLIC_BACKEND_URL (not EXPO_BACKEND_URL). The old test file test_taxpilot_api.py has 1 pre-existing failure on TestAuth::test_login_success caused by JWT iat/exp collision within same second — expected until the auth JTI fix ships. Chat + LLM extraction endpoints are live (Emergent LLM key) and take ~2-5s per response.",
+  "rca_of_issue": "Backend login intermittently returns 500 with DuplicateKeyError on user_sessions.session_token index. RCA: make_session_token() builds a JWT payload {user_id, exp=now+7d, iat=now}. datetime.now() is truncated to seconds inside PyJWT's default encoding, so if login is called within the same clock-second as signup (or two logins in same second), both JWTs are byte-identical and the unique index on session_token rejects the second insert. Reproduction: run `pytest test_taxpilot_api.py::TestAuth::test_login_success` (test_login_success runs immediately after the `auth` fixture signup). Mitigation: add `\"jti\": uuid.uuid4().hex` to the JWT payload OR `await db.user_sessions.update_one({'user_id': user_id}, {'$set': {...}}, upsert=True)` keyed by user_id."
+}

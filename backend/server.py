@@ -165,7 +165,7 @@ def now_utc() -> datetime:
 
 
 def make_session_token(user_id: str) -> str:
-    payload = {"user_id": user_id, "exp": now_utc() + timedelta(days=7), "iat": now_utc()}
+    payload = {"user_id": user_id, "exp": now_utc() + timedelta(days=7), "iat": now_utc(), "jti": uuid.uuid4().hex}
     return pyjwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 
@@ -581,6 +581,186 @@ async def act_on_review(review_id: str, req: ReviewAction, user=Depends(get_curr
     new_status = "resolved" if req.action == "acknowledge" else "skipped"
     await db.review_items.update_one({"review_id": review_id}, {"$set": {"status": new_status}})
     return {"ok": True, "status": new_status}
+
+
+# ---------- Refund Estimator (confidence-gated) ----------
+@api_router.get("/refund/estimate")
+async def refund_estimate(user=Depends(get_current_user)):
+    docs = await db.documents.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(500)
+    open_review = await db.review_items.count_documents({"user_id": user["user_id"], "status": "open"})
+
+    # Identify blockers (per compliance doc: block on unresolved conflicts / low confidence)
+    low_conf_docs, missing_types = [], []
+    min_confidence = 1.0
+    n = 0
+    for d in docs:
+        ext = d.get("extraction")
+        if ext and isinstance(ext, dict):
+            for f in ext.get("fields", []):
+                c = float(f.get("confidence", 0))
+                min_confidence = min(min_confidence, c)
+                n += 1
+                if c < 0.80:
+                    low_conf_docs.append({"filename": d["filename"], "field": f.get("label"), "confidence": c})
+        if d.get("status") == "expected":
+            missing_types.append(d.get("doc_type"))
+
+    classified_types = {d.get("doc_type") for d in docs if d.get("status") == "classified"}
+    has_income_doc = bool(classified_types & {"W-2", "1099-NEC", "1099-INT", "1099-DIV", "K-1"})
+
+    blockers: List[dict] = []
+    if not has_income_doc:
+        blockers.append({"code": "NO_INCOME_DOC", "message": "No income document (W-2 / 1099) classified yet."})
+    if missing_types:
+        blockers.append({"code": "MISSING_EXPECTED_DOC", "message": f"Expected documents not yet uploaded: {', '.join(missing_types)}."})
+    if low_conf_docs:
+        blockers.append({"code": "LOW_CONFIDENCE_FIELD", "message": f"{len(low_conf_docs)} field(s) below 80% confidence require review."})
+    if open_review > 0:
+        blockers.append({"code": "OPEN_REVIEW_ITEMS", "message": f"{open_review} item(s) in the human review queue."})
+
+    # Very rough sample estimate — labeled preliminary; NOT a filing decision.
+    est_amount = 0
+    if has_income_doc:
+        est_amount = 1200 + (400 if "1099-NEC" in classified_types else 0) + (150 if "Receipt" in classified_types else 0)
+
+    if blockers:
+        status = "blocked" if (low_conf_docs or open_review) else "insufficient_data"
+    else:
+        status = "estimated"
+
+    confidence_tier = "high" if min_confidence >= 0.90 else "medium" if min_confidence >= 0.80 else "low"
+
+    return {
+        "status": status,
+        "amount": est_amount if status == "estimated" else None,
+        "confidence_tier": confidence_tier if n > 0 else "unknown",
+        "blockers": blockers,
+        "disclaimer": "Preliminary estimate for review only. Not a filed return, not a tax decision. Verify with the applicable IRS publications and, for material items, a qualified tax professional.",
+        "computed_at": now_utc().isoformat(),
+    }
+
+
+# ---------- Potential Deduction Items (safer than swipe cards) ----------
+POTENTIAL_ITEMS_CATALOG = [
+    {"item_id": "medical_agi_floor", "title": "Potential medical expenses", "description": "You may have qualified medical expenses above the 7.5% AGI floor. Requires itemization and unreimbursed payment proof.", "authority": "Publication 502", "risk_tier": "high", "requires": ["Receipt"]},
+    {"item_id": "home_office", "title": "Potential home office deduction", "description": "Self-employment income detected. Home office requires exclusive and regular business use.", "authority": "Publication 587", "risk_tier": "high", "requires": ["1099-NEC"]},
+    {"item_id": "se_health_ins", "title": "Potential SE health insurance", "description": "Self-employed taxpayers may deduct qualified health insurance premiums. Requires net SE profit.", "authority": "Schedule 1 Instructions", "risk_tier": "medium", "requires": ["1099-NEC"]},
+    {"item_id": "retirement_savers", "title": "Potential Retirement Savings Contributions Credit", "description": "W-2 wages detected; may qualify for the Saver's Credit at certain AGI thresholds.", "authority": "Form 8880 Instructions", "risk_tier": "medium", "requires": ["W-2"]},
+    {"item_id": "student_loan_int", "title": "Potential student loan interest", "description": "Up to $2,500 above-the-line deduction; income-phased. Requires Form 1098-E.", "authority": "Publication 970", "risk_tier": "low", "requires": []},
+]
+
+DISPOSITIONS = {"review", "not_applicable", "need_help", "save_for_pro_review"}
+
+
+@api_router.get("/potential-items")
+async def potential_items(user=Depends(get_current_user)):
+    docs = await db.documents.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(500)
+    classified_types = {d.get("doc_type") for d in docs if d.get("status") == "classified"}
+    dispositions = await db.item_dispositions.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(500)
+    disp_map = {d["item_id"]: d for d in dispositions}
+
+    out = []
+    for it in POTENTIAL_ITEMS_CATALOG:
+        applicable = all(r in classified_types for r in it["requires"]) if it["requires"] else True
+        d = disp_map.get(it["item_id"])
+        out.append({
+            **it,
+            "detected": applicable,
+            "disposition": d.get("disposition") if d else None,
+            "disposition_at": d.get("updated_at") if d else None,
+        })
+    return {"items": out, "disclaimer": "These are potential items detected from your documents. Detection does NOT confirm eligibility. Review the authority and required facts before taking any action."}
+
+
+class DispositionRequest(BaseModel):
+    disposition: str
+
+
+@api_router.post("/potential-items/{item_id}/disposition")
+async def set_disposition(item_id: str, req: DispositionRequest, user=Depends(get_current_user)):
+    if req.disposition not in DISPOSITIONS:
+        raise HTTPException(400, f"disposition must be one of {sorted(DISPOSITIONS)}")
+    if not any(i["item_id"] == item_id for i in POTENTIAL_ITEMS_CATALOG):
+        raise HTTPException(404, "Unknown item_id")
+    await db.item_dispositions.update_one(
+        {"user_id": user["user_id"], "item_id": item_id},
+        {"$set": {"user_id": user["user_id"], "item_id": item_id, "disposition": req.disposition, "updated_at": now_utc().isoformat()}},
+        upsert=True,
+    )
+    if req.disposition == "save_for_pro_review":
+        await db.review_items.insert_one({
+            "review_id": uuid.uuid4().hex,
+            "user_id": user["user_id"],
+            "document_id": None,
+            "title": f"Professional review requested: {item_id}",
+            "reason": "User saved this potential item for professional review before any return action.",
+            "severity": "info",
+            "status": "open",
+            "created_at": now_utc().isoformat(),
+        })
+    return {"ok": True, "disposition": req.disposition}
+
+
+# ---------- Tax Assistant Chat (grounded, refuses without authority) ----------
+CHAT_SYSTEM = """You are TaxPilot AI Assistant. You must follow these grounding rules:
+1) Answer ONLY from generally-published IRS publications and form instructions that you can name explicitly (e.g. Pub. 17, Pub. 502, Pub. 587, Pub. 970, Schedule A Instructions, Form 1040 Instructions).
+2) If the user's question is complex, fact-dependent, or you cannot cite an authoritative source, REFUSE to give a definitive answer and instead: (a) list the facts you would need, (b) name the likely authority, (c) recommend professional review.
+3) NEVER guarantee a refund, "maximize" a return, or state that a taxpayer qualifies for a deduction without stating the required conditions.
+4) NEVER file, sign, or authorize any tax action. You are an assistant only.
+5) Distinguish deductions from credits. Distinguish federal from state rules.
+6) Reply STRICTLY as JSON:
+{"answer": "...", "citations": [{"source":"Publication X","note":"..."}], "requires_review": true|false, "risk_tier":"low|medium|high", "missing_facts":["..."], "refusal": null | "brief reason if refusing"}"""
+
+
+class ChatRequest(BaseModel):
+    message: str
+    model: Optional[str] = "claude-sonnet-5"
+
+
+@api_router.post("/chat")
+async def tax_chat(req: ChatRequest, user=Depends(get_current_user)):
+    provider = "anthropic"
+    m = req.model or "claude-sonnet-5"
+    if m.startswith("gpt"): provider = "openai"
+    elif m.startswith("gemini"): provider = "gemini"
+
+    chat = LlmChat(
+        api_key=EMERGENT_LLM_KEY,
+        session_id=f"chat-{user['user_id']}",
+        system_message=CHAT_SYSTEM,
+    ).with_model(provider, m)
+
+    try:
+        resp = await chat.send_message(UserMessage(text=req.message))
+        text = resp if isinstance(resp, str) else str(resp)
+        start, end = text.find("{"), text.rfind("}")
+        parsed = json.loads(text[start:end + 1]) if start != -1 else {}
+    except Exception as e:
+        logging.warning(f"chat llm failed: {e}")
+        parsed = {
+            "answer": "I can't answer that with authority right now. Please try again or consult a qualified tax professional for material questions.",
+            "citations": [],
+            "requires_review": True,
+            "risk_tier": "high",
+            "missing_facts": [],
+            "refusal": "assistant_unavailable",
+        }
+
+    # Audit log per doc requirements
+    await db.chat_audit.insert_one({
+        "audit_id": uuid.uuid4().hex,
+        "user_id": user["user_id"],
+        "question": req.message,
+        "answer": parsed.get("answer"),
+        "citations": parsed.get("citations", []),
+        "risk_tier": parsed.get("risk_tier"),
+        "requires_review": bool(parsed.get("requires_review")),
+        "refusal": parsed.get("refusal"),
+        "model": f"{provider}:{m}",
+        "created_at": now_utc().isoformat(),
+    })
+
+    return parsed
 
 
 # ---------- Return Pipeline Status ----------

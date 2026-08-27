@@ -1,13 +1,33 @@
-import { View, Text, StyleSheet, Pressable, ScrollView } from 'react-native';
+import { useEffect, useState } from 'react';
+import { View, Text, StyleSheet, Pressable, ScrollView, Switch } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { THEME, SPACING, RADIUS } from '@/src/theme';
 import { useAuth } from '@/src/auth';
+import { authenticate, isBiometricEnabled, isBiometricSupported, setBiometricEnabled } from '@/src/biometric';
 
 export default function Profile() {
   const router = useRouter();
   const { user, signOut } = useAuth();
+  const [bioSupported, setBioSupported] = useState(false);
+  const [bioEnabled, setBioEnabledState] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      setBioSupported(await isBiometricSupported());
+      setBioEnabledState(await isBiometricEnabled());
+    })();
+  }, []);
+
+  async function toggleBio(next: boolean) {
+    if (next) {
+      const ok = await authenticate('Enable biometric unlock for TaxPilot');
+      if (!ok) return;
+    }
+    await setBiometricEnabled(next);
+    setBioEnabledState(next);
+  }
 
   async function onSignOut() {
     await signOut();
@@ -34,6 +54,17 @@ export default function Profile() {
 
         <Text style={styles.sectionTitle}>Security & Compliance</Text>
         <View style={styles.list}>
+          {bioSupported && (
+            <View style={styles.row}>
+              <View style={styles.rowIcon}><Ionicons name="finger-print" size={18} color={THEME.brandPrimary} /></View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.rowTitle}>Biometric unlock</Text>
+                <Text style={styles.rowSub}>Face ID / Touch ID unlocks a device-stored session. No templates leave your device.</Text>
+              </View>
+              <Switch value={bioEnabled} onValueChange={toggleBio} trackColor={{ true: THEME.brandPrimary, false: THEME.border }} thumbColor="#FFF" testID="bio-toggle" />
+            </View>
+          )}
+          <Row icon="shield-checkmark" title="Compliance & Guardrails" sub="How TaxPilot stays safe: principles, boundary, audit" onPress={() => router.push('/compliance')} />
           <Row icon="lock-closed" title="WISP · Written Information Security Plan" sub="IRS Pub. 4557 aligned" />
           <Row icon="document-text" title="§7216 Consent" sub="Explicit consent captured per client" />
           <Row icon="git-network" title="Immutable audit log" sub="Every figure traces back to a source document" />
@@ -44,6 +75,8 @@ export default function Profile() {
 
         <Text style={styles.sectionTitle}>App</Text>
         <View style={styles.list}>
+          <Row icon="chatbubbles" title="Tax Assistant" sub="Source-grounded answers · refuses without authority" onPress={() => router.push('/chat')} />
+          <Row icon="sparkles" title="Potential items" sub="Detected deductions & credits for your review" onPress={() => router.push('/deductions')} />
           <Row icon="play-circle" title="Interactive demo" sub="Walk through with sample data" onPress={() => router.push('/demo')} />
           <Row icon="cloud-upload" title="Upload document" sub="Camera, photos, or files" onPress={() => router.push('/upload')} />
         </View>

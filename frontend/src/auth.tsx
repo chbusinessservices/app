@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { api, clearToken, getToken, setToken } from '@/src/api';
+import { authenticate, isBiometricEnabled, isBiometricSupported } from '@/src/biometric';
 
 export type User = {
   user_id: string;
@@ -12,6 +13,8 @@ export type User = {
 type AuthCtx = {
   user: User | null;
   loading: boolean;
+  locked: boolean;
+  unlock: () => Promise<boolean>;
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string, name?: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -25,19 +28,31 @@ const Ctx = createContext<AuthCtx | null>(null);
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [locked, setLocked] = useState(false);
 
   const refresh = useCallback(async () => {
     const t = await getToken();
-    if (!t) { setUser(null); setLoading(false); return; }
+    if (!t) { setUser(null); setLocked(false); setLoading(false); return; }
     try {
       const me = await api<User>('/auth/me');
       setUser(me);
+      // If biometric is enabled and supported, gate the session behind unlock
+      const bioOn = await isBiometricEnabled();
+      const bioOk = bioOn ? await isBiometricSupported() : false;
+      setLocked(bioOn && bioOk);
     } catch {
       await clearToken();
       setUser(null);
+      setLocked(false);
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  const unlock = useCallback(async () => {
+    const ok = await authenticate('Unlock TaxPilot AI');
+    if (ok) setLocked(false);
+    return ok;
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
@@ -62,6 +77,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try { await api('/auth/logout', { method: 'POST' }); } catch {}
     await clearToken();
     setUser(null);
+    setLocked(false);
   }, []);
 
   const exchangeSessionId = useCallback(async (sessionId: string) => {
@@ -81,7 +97,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <Ctx.Provider value={{ user, loading, signIn, signUp, signOut, exchangeSessionId, appleSignIn, refresh }}>
+    <Ctx.Provider value={{ user, loading, locked, unlock, signIn, signUp, signOut, exchangeSessionId, appleSignIn, refresh }}>
       {children}
     </Ctx.Provider>
   );

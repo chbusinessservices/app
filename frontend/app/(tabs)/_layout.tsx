@@ -3,9 +3,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/src/auth';
 import { THEME } from '@/src/theme';
 import { View, ActivityIndicator } from 'react-native';
+import { LockScreen } from '@/src/components/LockScreen';
 
 export default function TabsLayout() {
-  const { user, loading } = useAuth();
+  const { user, loading, locked } = useAuth();
   if (loading) {
     return (
       <View style={{ flex: 1, backgroundColor: THEME.surface, alignItems: 'center', justifyContent: 'center' }}>
@@ -14,6 +15,7 @@ export default function TabsLayout() {
     );
   }
   if (!user) return <Redirect href="/(auth)/onboarding" />;
+  if (locked) return <LockScreen />;
 
   return (
     <Tabs

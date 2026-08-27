@@ -10,17 +10,25 @@ import { api } from '@/src/api';
 
 type Step = { key: string; name: string; description: string; completed: boolean };
 type Status = { steps: Step[]; counts: { documents: number; classified: number; open_review: number }; estimated_savings_usd: number; estimated_time_saved_min: number };
+type Refund = { status: 'estimated' | 'blocked' | 'insufficient_data'; amount: number | null; confidence_tier: string; blockers: { code: string; message: string }[]; disclaimer: string };
 
 export default function Dashboard() {
   const router = useRouter();
   const { user } = useAuth();
   const [status, setStatus] = useState<Status | null>(null);
+  const [refund, setRefund] = useState<Refund | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [seeding, setSeeding] = useState(false);
 
   const load = useCallback(async () => {
-    try { const s = await api<Status>('/return/status'); setStatus(s); } catch {}
+    try {
+      const [s, r] = await Promise.all([
+        api<Status>('/return/status'),
+        api<Refund>('/refund/estimate'),
+      ]);
+      setStatus(s); setRefund(r);
+    } catch {}
     setLoading(false); setRefreshing(false);
   }, []);
 
@@ -90,8 +98,42 @@ export default function Dashboard() {
               <QuickCard testID="quick-review" icon="alert-circle" label="Review queue" badge={status?.counts.open_review || 0} onPress={() => router.push('/(tabs)/review')} />
             </View>
             <View style={styles.quickRow}>
+              <QuickCard testID="quick-chat" icon="chatbubbles" label="Tax assistant" onPress={() => router.push('/chat')} />
+              <QuickCard testID="quick-deductions" icon="sparkles" label="Potential items" onPress={() => router.push('/deductions')} />
+            </View>
+            <View style={styles.quickRow}>
               <QuickCard testID="quick-demo" icon="play-circle" label="Try demo" onPress={() => router.push('/demo')} />
               <QuickCard testID="quick-vault" icon="folder-open" label={`Vault · ${status?.counts.documents || 0}`} onPress={() => router.push('/(tabs)/documents')} />
+            </View>
+
+            <Text style={styles.sectionTitle}>Refund estimate</Text>
+            <View style={styles.refundCard} testID="refund-card">
+              {refund?.status === 'estimated' ? (
+                <>
+                  <View style={styles.refundHead}>
+                    <Ionicons name="cash" size={18} color={THEME.success} />
+                    <Text style={styles.refundLabel}>Preliminary estimate</Text>
+                    <View style={styles.tierPill}><Text style={styles.tierText}>{refund.confidence_tier} confidence</Text></View>
+                  </View>
+                  <Text style={styles.refundAmount}>${refund.amount?.toLocaleString()}</Text>
+                  <Text style={styles.refundDisclaimer}>{refund.disclaimer}</Text>
+                </>
+              ) : (
+                <>
+                  <View style={styles.refundHead}>
+                    <Ionicons name={refund?.status === 'blocked' ? 'lock-closed' : 'hourglass'} size={18} color={THEME.warning} />
+                    <Text style={styles.refundLabel}>{refund?.status === 'blocked' ? 'Estimate blocked' : 'Not enough data yet'}</Text>
+                  </View>
+                  <Text style={styles.refundAmountBlocked}>—</Text>
+                  {refund?.blockers.map((b, i) => (
+                    <View key={i} style={styles.blockerRow}>
+                      <View style={styles.blockerDot} />
+                      <Text style={styles.blockerText}>{b.message}</Text>
+                    </View>
+                  ))}
+                  <Text style={styles.refundDisclaimer}>Refund estimates are blocked until low-confidence fields and open review items are resolved.</Text>
+                </>
+              )}
             </View>
 
             <Text style={styles.sectionTitle}>The workflow</Text>
@@ -180,4 +222,15 @@ const styles = StyleSheet.create({
   stepDesc: { fontSize: 12, color: THEME.onSurfaceTertiary, marginTop: 2 },
   seedBtn: { flexDirection: 'row', gap: SPACING.sm, backgroundColor: THEME.brandPrimary, paddingVertical: SPACING.lg, borderRadius: RADIUS.md, alignItems: 'center', justifyContent: 'center', marginTop: SPACING.xl },
   seedBtnText: { color: THEME.onBrandPrimary, fontWeight: '600', fontSize: 15 },
+  refundCard: { backgroundColor: THEME.surfaceSecondary, borderRadius: RADIUS.lg, padding: SPACING.lg, borderWidth: 1, borderColor: THEME.border },
+  refundHead: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm, marginBottom: SPACING.sm },
+  refundLabel: { fontSize: 13, fontWeight: '600', color: THEME.onSurface, flex: 1 },
+  tierPill: { paddingHorizontal: SPACING.sm, paddingVertical: 2, borderRadius: RADIUS.pill, backgroundColor: THEME.brandTertiary },
+  tierText: { fontSize: 10, fontWeight: '700', color: THEME.brandPrimary, textTransform: 'uppercase', letterSpacing: 0.5 },
+  refundAmount: { fontSize: 32, fontWeight: '700', color: THEME.success, marginBottom: SPACING.sm },
+  refundAmountBlocked: { fontSize: 32, fontWeight: '700', color: THEME.onSurfaceTertiary, marginBottom: SPACING.sm },
+  refundDisclaimer: { fontSize: 11, color: THEME.onSurfaceTertiary, lineHeight: 16, marginTop: SPACING.sm },
+  blockerRow: { flexDirection: 'row', gap: 8, alignItems: 'flex-start', marginTop: 4 },
+  blockerDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: THEME.warning, marginTop: 7 },
+  blockerText: { flex: 1, fontSize: 12, color: THEME.onSurface, lineHeight: 17 },
 });
