@@ -1,0 +1,45 @@
+{
+  "summary": "Iteration 3 tested the 4 new features (Source registry, Reviewer Handoff PDF, Prior-Year Switcher, §7216 Consent Center). Backend (pytest): added /app/backend/tests/test_iteration3_features.py with 11 tests — all PASSED (11/11). Sources returns exactly 8 entries (7 approved + 1 superseded) with revision/date/hash/official_url/tax_years. Preferences GET returns defaults for a fresh user (tax_year=2025, consent_7216=false); POST accepts 2023/2024/2025 and persists cpa_email; rejects 2020 with 400. Consent /consent/7216 rejects accept=false and blank signed_name; on success sets consent_7216=true + timestamp. Revoke sets consent_7216=false and consent_7216_revoked_at. Handoff /handoff/home_office/pdf returned a real PDF (base64 decoded, bytes start with '%PDF', >500 bytes) plus filename+cpa_email; unknown item returns 404. Chat with tax_year=2023 echoes 'tax_year': 2023 in response. Regression: pre-existing test_new_features.py 12/12 PASSED. Frontend (mobile viewport 390x844, fresh signup each run): Tax-Year pill on dashboard shows 'Tax Year 2025' by default, opens modal, selecting 2024 persists via /api/preferences and header updates to 'Tax Year 2024'. Setting to 2023 then opening Chat: subtitle correctly reads 'Tax Year 2023' and question receives grounded AI response (1 /api/chat call observed). Profile shows the 3 new rows (§7216 Consent Center, Source registry, Compliance & Guardrails); tapping each navigates correctly. /sources renders 8 source cards with data-testid=source-<id>, approved cards show 'APPROVED' badge, superseded card uses opacity 0.7. /consent full round-trip verified: 'No consent captured' state → typed name + accepted checkbox + Sign → screen switches to 'consent on file' with Revoke button visible → Revoke returns to no-consent state. /deductions: expanding home_office and tapping 'Save for pro review' shows the 'Generate reviewer packet' button (testID handoff-home_office). Tapping it fires exactly one /api/handoff/home_office/pdf call and web download starts (no console errors). No red screen, no runtime errors in console for any flow tested.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/auth/login (same-second re-login)", "issue": "Pre-existing JWT jti/iat collision — carried over from iteration_2. Not user-facing; still recommend adding a random jti to make_session_token()."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "sources / consent / dashboard", "issues": ["Pre-existing 'Image style.resizeMode is deprecated' and 'props.pointerEvents is deprecated' RN-Web warnings only (non-blocking)."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration3_features.py",
+    "/app/backend/tests/test_new_features.py",
+    "/app/test_reports/pytest/iter3.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: server.py has grown to ~1150 lines (added sources, preferences, consent, handoff routes). Split into routers/ (auth, documents, review, refund, potential_items, chat, sources, preferences, consent, handoff) before next feature — same recommendation as iteration_2.",
+    "OPTIONAL: Add DB indexes for new collections: db.preferences.create_index('user_id', unique=True), db.consent_audit.create_index([('user_id',1),('timestamp',-1)]), db.handoff_audit.create_index([('user_id',1),('created_at',-1)]).",
+    "OPTIONAL: The 'requires' filter in /handoff/{item_id}/pdf falls back to all docs when requires==[] (student_loan_int), which is fine but could be documented — the PDF then lists every uploaded doc as 'supporting'.",
+    "MINOR (carried over): add random jti to JWT to avoid signup+login same-second DuplicateKeyError."
+  ],
+  "critical_code_review_comments": [
+    "server.py:781 — `supporting = [d for d in docs if d.get('doc_type') in item.get('requires', []) or item.get('requires') == []]` — the second clause makes every doc 'supporting' when requires is empty; acceptable but ambiguous. Consider explicit branch.",
+    "PDF is base64-encoded in JSON response (~3KB base64 for a 2.2KB PDF). Fine for MVP, but for larger packets consider StreamingResponse with Content-Disposition on the backend and expo-file-system on native.",
+    "Consent audit collection is append-only but has no index on user_id — will slow with growth.",
+    "SOURCE_REGISTRY is hardcoded in Python — same 'move to Mongo/JSON per-tax-year' recommendation from iteration_2 applies (aligns with the versioned-authority principle the compliance screen advertises)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration3_features.py",
+    "/app/test_reports/iteration_3.json",
+    "/app/test_reports/pytest/iter3.xml"
+  ],
+  "success_rate": {"backend": "100% (11/11 new + 12/12 regression = 23/23)", "frontend": "100% — all 4 new features verified end-to-end on mobile viewport"},
+  "seed_data_creation": "Per-run unique users (TEST_iter3_*, e2e_i3_*, e2e_i3b_*); one seeded via /api/demo/seed to populate documents needed for home_office 'save_for_pro_review' → PDF handoff flow.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend iter3 tests at /app/backend/tests/test_iteration3_features.py — run with `EXPO_PUBLIC_BACKEND_URL=<url> pytest /app/backend/tests/test_iteration3_features.py -v`. Env var is EXPO_PUBLIC_BACKEND_URL. All 4 iter3 features are fully wired and working end-to-end: sources (8 entries), preferences GET/POST + validation, consent sign/revoke, handoff PDF (real %PDF- bytes), chat tax_year echo. Frontend testIDs added: tax-year-pill, year-2023/2024/2025, sources-screen, source-<id>, consent-screen, signed-name-input, accept-checkbox, sign-consent-btn, revoke-btn, handoff-<item_id>. Profile rows use text-based navigation (no testIDs on rows, but text selectors work: '§7216 Consent Center', 'Source registry', 'Compliance & Guardrails').",
+  "rca_of_issue": "n/a — no bugs found in iter3 features. Pre-existing rapid-login 500 from iteration_2 still open (jti fix) but out of scope for this review."
+}

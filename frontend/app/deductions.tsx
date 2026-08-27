@@ -1,8 +1,10 @@
 import { useCallback, useState } from 'react';
-import { View, Text, StyleSheet, FlatList, Pressable, ActivityIndicator, RefreshControl } from 'react-native';
+import { View, Text, StyleSheet, FlatList, Pressable, ActivityIndicator, RefreshControl, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useFocusEffect } from 'expo-router';
+import * as FileSystem from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
 import { THEME, SPACING, RADIUS } from '@/src/theme';
 import { api } from '@/src/api';
 
@@ -53,6 +55,35 @@ export default function Deductions() {
       await api(`/potential-items/${itemId}/disposition`, { method: 'POST', body: JSON.stringify({ disposition }) });
       setItems(prev => prev.map(i => i.item_id === itemId ? { ...i, disposition } : i));
     } catch {}
+  }
+
+  const [handoffBusy, setHandoffBusy] = useState<string | null>(null);
+  async function generateHandoff(itemId: string) {
+    try {
+      setHandoffBusy(itemId);
+      const r = await api<{ filename: string; pdf_base64: string; cpa_email: string | null }>(`/handoff/${itemId}/pdf`, { method: 'POST' });
+      if (Platform.OS === 'web') {
+        // Trigger browser download
+        const bin = atob(r.pdf_base64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const blob = new Blob([bytes], { type: 'application/pdf' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = r.filename; a.click();
+        URL.revokeObjectURL(url);
+      } else {
+        const path = (FileSystem as any).cacheDirectory + r.filename;
+        await FileSystem.writeAsStringAsync(path, r.pdf_base64, { encoding: 'base64' as any });
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(path, { mimeType: 'application/pdf', UTI: 'com.adobe.pdf', dialogTitle: 'Send to your CPA' });
+        }
+      }
+    } catch (e) {
+      // swallow — user cancel or share unavailable
+    } finally {
+      setHandoffBusy(null);
+    }
   }
 
   return (
@@ -135,6 +166,17 @@ export default function Deductions() {
                         <Text style={styles.dispText}>{DISP_LABEL[item.disposition]}</Text>
                       </View>
                     )}
+
+                    {item.disposition === 'save_for_pro_review' && (
+                      <Pressable style={styles.handoffBtn} onPress={() => generateHandoff(item.item_id)} disabled={handoffBusy === item.item_id} testID={`handoff-${item.item_id}`}>
+                        {handoffBusy === item.item_id ? <ActivityIndicator color={THEME.onBrandPrimary} /> : (
+                          <>
+                            <Ionicons name="share" size={14} color={THEME.onBrandPrimary} />
+                            <Text style={styles.handoffText}>Generate reviewer packet</Text>
+                          </>
+                        )}
+                      </Pressable>
+                    )}
                   </View>
                 )}
               </View>
@@ -170,4 +212,6 @@ const styles = StyleSheet.create({
   actionText: { fontSize: 12, fontWeight: '600', color: THEME.brandPrimary },
   dispPill: { flexDirection: 'row', gap: 4, alignSelf: 'flex-start', backgroundColor: THEME.brandTertiary, paddingHorizontal: SPACING.md, paddingVertical: 4, borderRadius: RADIUS.pill, alignItems: 'center' },
   dispText: { fontSize: 11, fontWeight: '700', color: THEME.brandPrimary },
+  handoffBtn: { flexDirection: 'row', gap: SPACING.sm, backgroundColor: THEME.brandPrimary, paddingVertical: SPACING.sm, borderRadius: RADIUS.md, alignItems: 'center', justifyContent: 'center', marginTop: SPACING.sm },
+  handoffText: { color: THEME.onBrandPrimary, fontSize: 13, fontWeight: '600' },
 });

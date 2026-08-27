@@ -64,9 +64,10 @@ export default function Profile() {
               <Switch value={bioEnabled} onValueChange={toggleBio} trackColor={{ true: THEME.brandPrimary, false: THEME.border }} thumbColor="#FFF" testID="bio-toggle" />
             </View>
           )}
+          <Row icon="document-text" title="§7216 Consent Center" sub="Sign, review, or revoke data-use consent" onPress={() => router.push('/consent')} />
+          <Row icon="library" title="Source registry" sub="IRS publications, revisions, and hashes" onPress={() => router.push('/sources')} />
           <Row icon="shield-checkmark" title="Compliance & Guardrails" sub="How TaxPilot stays safe: principles, boundary, audit" onPress={() => router.push('/compliance')} />
           <Row icon="lock-closed" title="WISP · Written Information Security Plan" sub="IRS Pub. 4557 aligned" />
-          <Row icon="document-text" title="§7216 Consent" sub="Explicit consent captured per client" />
           <Row icon="git-network" title="Immutable audit log" sub="Every figure traces back to a source document" />
           <Row icon="cloud-done" title="Encryption at rest & in transit" sub="TLS 1.3 + AES-256" />
           <Row icon="time" title="Retention policy" sub="7-year default with defined deletion" />

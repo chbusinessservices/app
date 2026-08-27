@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, Pressable, ImageBackground, RefreshControl, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, Pressable, ImageBackground, RefreshControl, ActivityIndicator, Modal } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
@@ -11,26 +11,40 @@ import { api } from '@/src/api';
 type Step = { key: string; name: string; description: string; completed: boolean };
 type Status = { steps: Step[]; counts: { documents: number; classified: number; open_review: number }; estimated_savings_usd: number; estimated_time_saved_min: number };
 type Refund = { status: 'estimated' | 'blocked' | 'insufficient_data'; amount: number | null; confidence_tier: string; blockers: { code: string; message: string }[]; disclaimer: string };
+type Prefs = { tax_year: number; cpa_email: string | null; consent_7216: boolean; consent_7216_at: string | null; consent_7216_revoked_at: string | null };
+
+const TAX_YEARS = [2025, 2024, 2023];
 
 export default function Dashboard() {
   const router = useRouter();
   const { user } = useAuth();
   const [status, setStatus] = useState<Status | null>(null);
   const [refund, setRefund] = useState<Refund | null>(null);
+  const [prefs, setPrefs] = useState<Prefs | null>(null);
+  const [yearPicker, setYearPicker] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [seeding, setSeeding] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [s, r] = await Promise.all([
+      const [s, r, p] = await Promise.all([
         api<Status>('/return/status'),
         api<Refund>('/refund/estimate'),
+        api<Prefs>('/preferences'),
       ]);
-      setStatus(s); setRefund(r);
+      setStatus(s); setRefund(r); setPrefs(p);
     } catch {}
     setLoading(false); setRefreshing(false);
   }, []);
+
+  async function setTaxYear(year: number) {
+    setYearPicker(false);
+    try {
+      const p = await api<Prefs>('/preferences', { method: 'POST', body: JSON.stringify({ tax_year: year }) });
+      setPrefs(p);
+    } catch {}
+  }
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
@@ -48,7 +62,11 @@ export default function Dashboard() {
         <View style={styles.header}>
           <View>
             <Text style={styles.hi}>Hi, {user?.name || 'there'} 👋</Text>
-            <Text style={styles.brandTag}>TaxPilot AI · Tax Year 2025</Text>
+            <Pressable onPress={() => setYearPicker(true)} style={styles.yearBtn} testID="tax-year-pill">
+              <Ionicons name="calendar" size={12} color={THEME.brandPrimary} />
+              <Text style={styles.brandTag}>Tax Year {prefs?.tax_year || 2025}</Text>
+              <Ionicons name="chevron-down" size={12} color={THEME.brandPrimary} />
+            </Pressable>
           </View>
           <Pressable style={styles.avatarBtn} onPress={() => router.push('/(tabs)/profile')} testID="header-avatar-btn">
             <Text style={styles.avatarText}>{(user?.name || user?.email || '?').slice(0, 1).toUpperCase()}</Text>
@@ -167,6 +185,21 @@ export default function Dashboard() {
           </>
         )}
       </ScrollView>
+
+      <Modal transparent visible={yearPicker} animationType="fade" onRequestClose={() => setYearPicker(false)}>
+        <Pressable style={styles.modalBackdrop} onPress={() => setYearPicker(false)}>
+          <View style={styles.modalCard} onStartShouldSetResponder={() => true}>
+            <Text style={styles.modalTitle}>Select tax year</Text>
+            <Text style={styles.modalSub}>Prior-year returns use prior-year IRS authority.</Text>
+            {TAX_YEARS.map(y => (
+              <Pressable key={y} style={[styles.yearRow, prefs?.tax_year === y && styles.yearRowActive]} onPress={() => setTaxYear(y)} testID={`year-${y}`}>
+                <Text style={[styles.yearRowText, prefs?.tax_year === y && { color: THEME.brandPrimary, fontWeight: '700' }]}>{y}</Text>
+                {prefs?.tax_year === y && <Ionicons name="checkmark" size={18} color={THEME.brandPrimary} />}
+              </Pressable>
+            ))}
+          </View>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -233,4 +266,12 @@ const styles = StyleSheet.create({
   blockerRow: { flexDirection: 'row', gap: 8, alignItems: 'flex-start', marginTop: 4 },
   blockerDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: THEME.warning, marginTop: 7 },
   blockerText: { flex: 1, fontSize: 12, color: THEME.onSurface, lineHeight: 17 },
+  yearBtn: { flexDirection: 'row', gap: 4, alignItems: 'center', backgroundColor: THEME.brandTertiary, paddingHorizontal: SPACING.sm, paddingVertical: 3, borderRadius: RADIUS.pill, alignSelf: 'flex-start', marginTop: 4 },
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', alignItems: 'center', justifyContent: 'center', padding: SPACING.xl },
+  modalCard: { width: '100%', maxWidth: 340, backgroundColor: THEME.surfaceSecondary, borderRadius: RADIUS.lg, padding: SPACING.lg },
+  modalTitle: { fontSize: 18, fontWeight: '700', color: THEME.onSurface },
+  modalSub: { fontSize: 12, color: THEME.onSurfaceTertiary, marginTop: 4, marginBottom: SPACING.md },
+  yearRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: SPACING.md, paddingHorizontal: SPACING.md, borderRadius: RADIUS.md, marginTop: 2 },
+  yearRowActive: { backgroundColor: THEME.brandTertiary },
+  yearRowText: { fontSize: 16, color: THEME.onSurface },
 });

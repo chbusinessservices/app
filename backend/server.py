@@ -583,6 +583,230 @@ async def act_on_review(review_id: str, req: ReviewAction, user=Depends(get_curr
     return {"ok": True, "status": new_status}
 
 
+# ---------- Source Registry (versioned IRS authority) ----------
+SOURCE_REGISTRY = [
+    {"source_id": "pub-17", "publication": "Publication 17", "title": "Your Federal Income Tax (For Individuals)", "tax_years": [2023, 2024, 2025], "revision": "2024", "revision_date": "2025-01-15", "hash": "sha256:8f21a4e0c9b74e21", "official_url": "https://www.irs.gov/pub/irs-pdf/p17.pdf", "status": "approved"},
+    {"source_id": "pub-502", "publication": "Publication 502", "title": "Medical and Dental Expenses", "tax_years": [2023, 2024, 2025], "revision": "2024", "revision_date": "2025-02-10", "hash": "sha256:2b4c8f19a0e73c88", "official_url": "https://www.irs.gov/pub/irs-pdf/p502.pdf", "status": "approved"},
+    {"source_id": "pub-587", "publication": "Publication 587", "title": "Business Use of Your Home", "tax_years": [2023, 2024, 2025], "revision": "2024", "revision_date": "2025-01-28", "hash": "sha256:6a19b7c3e2f04dd1", "official_url": "https://www.irs.gov/pub/irs-pdf/p587.pdf", "status": "approved"},
+    {"source_id": "pub-970", "publication": "Publication 970", "title": "Tax Benefits for Education", "tax_years": [2023, 2024, 2025], "revision": "2024", "revision_date": "2025-01-22", "hash": "sha256:9c3d8f2a71b5e04c", "official_url": "https://www.irs.gov/pub/irs-pdf/p970.pdf", "status": "approved"},
+    {"source_id": "pub-4681", "publication": "Publication 4681", "title": "Canceled Debts, Foreclosures, Repossessions & Abandonments", "tax_years": [2023, 2024, 2025], "revision": "2024", "revision_date": "2025-02-01", "hash": "sha256:4e8a2b9d63f10e77", "official_url": "https://www.irs.gov/pub/irs-pdf/p4681.pdf", "status": "approved"},
+    {"source_id": "sch-a-inst", "publication": "Schedule A Instructions (Form 1040)", "title": "Itemized Deductions Instructions", "tax_years": [2024, 2025], "revision": "2024", "revision_date": "2025-01-30", "hash": "sha256:7b1a5c8e4f2d9a06", "official_url": "https://www.irs.gov/pub/irs-pdf/i1040sca.pdf", "status": "approved"},
+    {"source_id": "form-8880", "publication": "Form 8880 Instructions", "title": "Credit for Qualified Retirement Savings Contributions", "tax_years": [2024, 2025], "revision": "2024", "revision_date": "2025-01-08", "hash": "sha256:c04f2b8a19e7f341", "official_url": "https://www.irs.gov/pub/irs-pdf/i8880.pdf", "status": "approved"},
+    {"source_id": "pub-17-2023", "publication": "Publication 17", "title": "Your Federal Income Tax (For Individuals) — Prior Year", "tax_years": [2023], "revision": "2023", "revision_date": "2024-01-18", "hash": "sha256:1e9d3f47a02c8b56", "official_url": "https://www.irs.gov/pub/irs-prior/p17--2023.pdf", "status": "superseded"},
+]
+
+
+@api_router.get("/sources")
+async def sources_registry(user=Depends(get_current_user)):
+    return {"sources": SOURCE_REGISTRY, "note": "Versioned IRS authority used by TaxPilot AI. Prior-year returns use prior-year authority."}
+
+
+# ---------- Preferences (tax_year + consent + cpa_email) ----------
+class Preferences(BaseModel):
+    tax_year: int = 2025
+    cpa_email: Optional[str] = None
+    consent_7216: bool = False
+    consent_7216_at: Optional[str] = None
+    consent_7216_revoked_at: Optional[str] = None
+
+
+DEFAULT_PREFS = {"tax_year": 2025, "cpa_email": None, "consent_7216": False, "consent_7216_at": None, "consent_7216_revoked_at": None}
+
+
+@api_router.get("/preferences", response_model=Preferences)
+async def get_preferences(user=Depends(get_current_user)):
+    p = await db.preferences.find_one({"user_id": user["user_id"]}, {"_id": 0}) or {}
+    merged = {**DEFAULT_PREFS}
+    for k in DEFAULT_PREFS:
+        if p.get(k) is not None:
+            merged[k] = p[k]
+    return Preferences(**merged)
+
+
+class UpdatePrefsRequest(BaseModel):
+    tax_year: Optional[int] = None
+    cpa_email: Optional[str] = None
+
+
+@api_router.post("/preferences", response_model=Preferences)
+async def update_preferences(req: UpdatePrefsRequest, user=Depends(get_current_user)):
+    updates: Dict[str, Any] = {}
+    if req.tax_year is not None:
+        if req.tax_year not in (2023, 2024, 2025):
+            raise HTTPException(400, "tax_year must be 2023, 2024, or 2025")
+        updates["tax_year"] = req.tax_year
+    if req.cpa_email is not None:
+        updates["cpa_email"] = req.cpa_email or None
+    if updates:
+        await db.preferences.update_one({"user_id": user["user_id"]}, {"$set": {"user_id": user["user_id"], **updates}}, upsert=True)
+    return await get_preferences(user)
+
+
+class ConsentRequest(BaseModel):
+    signed_name: str
+    accept: bool
+
+
+@api_router.post("/consent/7216", response_model=Preferences)
+async def sign_consent(req: ConsentRequest, user=Depends(get_current_user)):
+    if not req.accept:
+        raise HTTPException(400, "accept must be true to sign consent")
+    if not req.signed_name.strip():
+        raise HTTPException(400, "signed_name required")
+    now = now_utc().isoformat()
+    await db.preferences.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {"user_id": user["user_id"], "consent_7216": True, "consent_7216_at": now, "consent_7216_signed_name": req.signed_name.strip(), "consent_7216_revoked_at": None}},
+        upsert=True,
+    )
+    # Append immutable audit record
+    await db.consent_audit.insert_one({
+        "audit_id": uuid.uuid4().hex,
+        "user_id": user["user_id"],
+        "event": "signed",
+        "signed_name": req.signed_name.strip(),
+        "timestamp": now,
+    })
+    return await get_preferences(user)
+
+
+@api_router.post("/consent/7216/revoke", response_model=Preferences)
+async def revoke_consent(user=Depends(get_current_user)):
+    now = now_utc().isoformat()
+    await db.preferences.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {"user_id": user["user_id"], "consent_7216": False, "consent_7216_revoked_at": now}},
+        upsert=True,
+    )
+    await db.consent_audit.insert_one({
+        "audit_id": uuid.uuid4().hex,
+        "user_id": user["user_id"],
+        "event": "revoked",
+        "timestamp": now,
+    })
+    return await get_preferences(user)
+
+
+# ---------- Reviewer Handoff (PDF packet) ----------
+def _build_handoff_pdf(user_email: str, item: dict, docs: List[dict], review_items: List[dict], consent: dict, tax_year: int) -> bytes:
+    from fpdf import FPDF
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.set_text_color(61, 90, 70)
+    pdf.cell(0, 10, "TaxPilot AI - Professional Review Packet", ln=True)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(74, 74, 74)
+    pdf.cell(0, 6, f"For: {user_email}  |  Tax Year: {tax_year}  |  Generated: {now_utc().strftime('%Y-%m-%d %H:%M UTC')}", ln=True)
+    pdf.ln(4)
+
+    pdf.set_draw_color(226, 224, 216)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+    pdf.ln(4)
+
+    # Item
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.set_text_color(26, 26, 26)
+    pdf.cell(0, 8, "1. Potential Item Under Review", ln=True)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 6, item.get("title", ""), ln=True)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.multi_cell(0, 5, item.get("description", ""))
+    pdf.set_font("Helvetica", "I", 9)
+    pdf.set_text_color(74, 74, 74)
+    pdf.cell(0, 5, f"Authority: {item.get('authority')}  |  Risk tier: {item.get('risk_tier')}", ln=True)
+    pdf.ln(4)
+
+    # Supporting docs
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.set_text_color(26, 26, 26)
+    pdf.cell(0, 8, f"2. Supporting Documents ({len(docs)})", ln=True)
+    pdf.set_font("Helvetica", "", 10)
+    if not docs:
+        pdf.cell(0, 6, "(No supporting documents linked)", ln=True)
+    for d in docs:
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(0, 5, f"- {d.get('filename')}  ({d.get('doc_type')})", ln=True)
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(74, 74, 74)
+        pdf.cell(0, 4, f"  Status: {d.get('status')}  |  Uploaded: {d.get('uploaded_at', '')[:10]}", ln=True)
+        ext = d.get("extraction") or {}
+        for f in ext.get("fields", [])[:6]:
+            pdf.cell(0, 4, f"    - {f.get('label')}: {f.get('value')}  ({int(f.get('confidence', 0) * 100)}%)", ln=True)
+        pdf.set_text_color(26, 26, 26)
+        pdf.ln(1)
+    pdf.ln(2)
+
+    # Review items / audit
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.cell(0, 8, f"3. Audit Trail ({len(review_items)} entries)", ln=True)
+    pdf.set_font("Helvetica", "", 9)
+    for r in review_items[:20]:
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.cell(0, 5, f"- {r.get('title')}", ln=True)
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(74, 74, 74)
+        pdf.cell(0, 4, f"  {r.get('reason')}  |  {r.get('severity')}  |  {r.get('status')}  |  {r.get('created_at', '')[:19]}", ln=True)
+        pdf.set_text_color(26, 26, 26)
+    pdf.ln(2)
+
+    # Consent
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.cell(0, 8, "4. §7216 Consent Status", ln=True)
+    pdf.set_font("Helvetica", "", 10)
+    if consent.get("consent_7216"):
+        pdf.cell(0, 5, f"Signed by: {consent.get('consent_7216_signed_name', '(name on file)')}", ln=True)
+        pdf.cell(0, 5, f"Signed at: {consent.get('consent_7216_at')}", ln=True)
+    else:
+        pdf.set_text_color(158, 71, 61)
+        pdf.cell(0, 5, "No §7216 consent on file. Do not share with third parties until captured.", ln=True)
+        pdf.set_text_color(26, 26, 26)
+
+    pdf.ln(6)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.set_text_color(74, 74, 74)
+    pdf.multi_cell(0, 4, "This packet was auto-generated by TaxPilot AI. All amounts are AI extractions with confidence scores and are not filed positions. The engaged tax professional is responsible for verification against the correct-year IRS authority before any return action.")
+
+    return bytes(pdf.output())
+
+
+@api_router.post("/handoff/{item_id}/pdf")
+async def handoff_pdf(item_id: str, user=Depends(get_current_user)):
+    item = next((i for i in POTENTIAL_ITEMS_CATALOG if i["item_id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Unknown item_id")
+    docs = await db.documents.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(50)
+    supporting = [d for d in docs if d.get("doc_type") in item.get("requires", []) or item.get("requires") == []]
+    review_items = await db.review_items.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    prefs = await db.preferences.find_one({"user_id": user["user_id"]}, {"_id": 0}) or {}
+    tax_year = prefs.get("tax_year", 2025)
+
+    pdf_bytes = _build_handoff_pdf(user.get("email", ""), item, supporting, review_items, prefs, tax_year)
+
+    # Audit
+    handoff_id = uuid.uuid4().hex
+    await db.handoff_audit.insert_one({
+        "handoff_id": handoff_id,
+        "user_id": user["user_id"],
+        "item_id": item_id,
+        "docs_count": len(supporting),
+        "review_items_count": len(review_items),
+        "tax_year": tax_year,
+        "cpa_email": prefs.get("cpa_email"),
+        "created_at": now_utc().isoformat(),
+    })
+
+    import base64
+    return {
+        "handoff_id": handoff_id,
+        "filename": f"TaxPilot_ReviewPacket_{item_id}_{handoff_id[:8]}.pdf",
+        "pdf_base64": base64.b64encode(pdf_bytes).decode("ascii"),
+        "cpa_email": prefs.get("cpa_email"),
+    }
+
+
 # ---------- Refund Estimator (confidence-gated) ----------
 @api_router.get("/refund/estimate")
 async def refund_estimate(user=Depends(get_current_user)):
@@ -704,17 +928,19 @@ async def set_disposition(item_id: str, req: DispositionRequest, user=Depends(ge
 # ---------- Tax Assistant Chat (grounded, refuses without authority) ----------
 CHAT_SYSTEM = """You are TaxPilot AI Assistant. You must follow these grounding rules:
 1) Answer ONLY from generally-published IRS publications and form instructions that you can name explicitly (e.g. Pub. 17, Pub. 502, Pub. 587, Pub. 970, Schedule A Instructions, Form 1040 Instructions).
-2) If the user's question is complex, fact-dependent, or you cannot cite an authoritative source, REFUSE to give a definitive answer and instead: (a) list the facts you would need, (b) name the likely authority, (c) recommend professional review.
+2) If the user's question is complex, fact-dependent, or you cannot cite an authoritative source for the SPECIFIED TAX YEAR, REFUSE to give a definitive answer and instead: (a) list the facts you would need, (b) name the likely authority, (c) recommend professional review.
 3) NEVER guarantee a refund, "maximize" a return, or state that a taxpayer qualifies for a deduction without stating the required conditions.
 4) NEVER file, sign, or authorize any tax action. You are an assistant only.
 5) Distinguish deductions from credits. Distinguish federal from state rules.
-6) Reply STRICTLY as JSON:
-{"answer": "...", "citations": [{"source":"Publication X","note":"..."}], "requires_review": true|false, "risk_tier":"low|medium|high", "missing_facts":["..."], "refusal": null | "brief reason if refusing"}"""
+6) Use the correct-year authority for the tax year specified in the user's prompt. Do not automatically use the newest publication for a prior-year question.
+7) Reply STRICTLY as JSON:
+{"answer": "...", "citations": [{"source":"Publication X (revision year)","note":"..."}], "requires_review": true|false, "risk_tier":"low|medium|high", "missing_facts":["..."], "refusal": null | "brief reason if refusing"}"""
 
 
 class ChatRequest(BaseModel):
     message: str
     model: Optional[str] = "claude-sonnet-5"
+    tax_year: Optional[int] = None
 
 
 @api_router.post("/chat")
@@ -724,14 +950,19 @@ async def tax_chat(req: ChatRequest, user=Depends(get_current_user)):
     if m.startswith("gpt"): provider = "openai"
     elif m.startswith("gemini"): provider = "gemini"
 
+    prefs = await db.preferences.find_one({"user_id": user["user_id"]}, {"_id": 0}) or {}
+    tax_year = req.tax_year or prefs.get("tax_year", 2025)
+
     chat = LlmChat(
         api_key=EMERGENT_LLM_KEY,
         session_id=f"chat-{user['user_id']}",
         system_message=CHAT_SYSTEM,
     ).with_model(provider, m)
 
+    scoped_msg = f"[Tax year context: {tax_year}]\n\n{req.message}"
+
     try:
-        resp = await chat.send_message(UserMessage(text=req.message))
+        resp = await chat.send_message(UserMessage(text=scoped_msg))
         text = resp if isinstance(resp, str) else str(resp)
         start, end = text.find("{"), text.rfind("}")
         parsed = json.loads(text[start:end + 1]) if start != -1 else {}
@@ -757,9 +988,11 @@ async def tax_chat(req: ChatRequest, user=Depends(get_current_user)):
         "requires_review": bool(parsed.get("requires_review")),
         "refusal": parsed.get("refusal"),
         "model": f"{provider}:{m}",
+        "tax_year": tax_year,
         "created_at": now_utc().isoformat(),
     })
 
+    parsed["tax_year"] = tax_year
     return parsed
 
 

@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TextInput, Pressable, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -14,6 +14,7 @@ type ChatAnswer = {
   risk_tier: 'low' | 'medium' | 'high';
   missing_facts: string[];
   refusal: string | null;
+  tax_year?: number;
 };
 
 type Turn = { role: 'user' | 'ai'; text?: string; ai?: ChatAnswer };
@@ -21,6 +22,7 @@ type Turn = { role: 'user' | 'ai'; text?: string; ai?: ChatAnswer };
 export default function Chat() {
   const router = useRouter();
   const [input, setInput] = useState('');
+  const [taxYear, setTaxYear] = useState<number>(2025);
   const [turns, setTurns] = useState<Turn[]>([
     { role: 'ai', ai: {
       answer: "Hi — I'm the TaxPilot assistant. I answer only from IRS publications and form instructions I can cite. If your question needs facts I don't have, I'll tell you what to gather instead of guessing.",
@@ -30,6 +32,10 @@ export default function Chat() {
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
 
+  useEffect(() => {
+    api<{ tax_year: number }>('/preferences').then(p => setTaxYear(p.tax_year)).catch(() => {});
+  }, []);
+
   async function send() {
     const msg = input.trim();
     if (!msg || loading) return;
@@ -37,7 +43,7 @@ export default function Chat() {
     setInput('');
     setLoading(true);
     try {
-      const r = await api<ChatAnswer>('/chat', { method: 'POST', body: JSON.stringify({ message: msg }) });
+      const r = await api<ChatAnswer>('/chat', { method: 'POST', body: JSON.stringify({ message: msg, tax_year: taxYear }) });
       setTurns(t => [...t, { role: 'ai', ai: r }]);
     } catch (e: any) {
       setTurns(t => [...t, { role: 'ai', ai: { answer: e.message || 'Assistant unavailable.', citations: [], requires_review: true, risk_tier: 'high', missing_facts: [], refusal: 'error' } }]);
@@ -55,7 +61,7 @@ export default function Chat() {
         </Pressable>
         <View style={{ flex: 1 }}>
           <Text style={styles.title}>Tax Assistant</Text>
-          <Text style={styles.subtitle}>Source-grounded · refuses without authority</Text>
+          <Text style={styles.subtitle}>Tax Year {taxYear} · Source-grounded · refuses without authority</Text>
         </View>
       </View>
 
