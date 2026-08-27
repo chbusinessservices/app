@@ -1,13 +1,17 @@
+# syntax=docker/dockerfile:1.7
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install dependencies. The private `emergentintegrations` package is not on
-# public PyPI; a local stub (in the bind-mounted source) satisfies its import.
-# fpdf2 is used lazily for PDF generation but missing from requirements.txt.
+# Install dependencies. BuildKit cache mount keeps downloaded wheels across
+# rebuilds so dependency changes are fast. The private `emergentintegrations`
+# package is not on public PyPI; a local stub (in the bind-mounted source)
+# satisfies its import. httpx and fpdf2 are used by the app but missing from
+# requirements.txt.
 COPY requirements.txt .
-RUN sed -i '/^emergentintegrations/d' requirements.txt \
-    && pip install --no-cache-dir -r requirements.txt httpx fpdf2
+RUN --mount=type=cache,target=/root/.cache/pip \
+    sed -i '/^emergentintegrations/d' requirements.txt \
+    && pip install -r requirements.txt httpx fpdf2
 
 EXPOSE 8000
 

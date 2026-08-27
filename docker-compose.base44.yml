@@ -13,15 +13,25 @@ services:
   backend:
     build: ./backend
     restart: unless-stopped
+    # Platform-managed secrets (last, so dashboard values always win over the
+    # repo's backend/.env fallback values loaded by load_dotenv at runtime).
+    env_file:
+      - /run/base44/app.env
     volumes:
       - ./backend:/app
     ports:
       - "8000:8000"
     environment:
-      # Override the repo .env's localhost value to reach the compose service.
+      # Local infra overrides (the repo .env points at localhost).
       - MONGO_URL=mongodb://mongo:27017
       - DB_NAME=taxpilot_db
       - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     depends_on:
       mongo:
         condition: service_healthy
@@ -40,6 +50,12 @@ services:
       - EXPO_PUBLIC_BACKEND_URL=https://8000-${BASE44_PUBLIC_HOST_SUFFIX}
       - BASE44_PUBLIC_HOST_SUFFIX=${BASE44_PUBLIC_HOST_SUFFIX}
       - EXPO_USE_FAST_RESOLVER=1
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8081/',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
     depends_on:
       - backend
 
