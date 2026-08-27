@@ -1,0 +1,167 @@
+{
+  "app_name": "TaxPilot AI",
+  "personality": "1 iOS-Native Clean",
+  "personality_one_liner": "A secure, structured, and highly readable environment that turns complex tax documents into calm, trustworthy progress.",
+  "color": {
+    "surface": "#F7F6F2",
+    "onSurface": "#1A1A1A",
+    "surfaceSecondary": "#FFFFFF",
+    "onSurfaceSecondary": "#1A1A1A",
+    "surfaceTertiary": "#EAE8E3",
+    "onSurfaceTertiary": "#4A4A4A",
+    "surfaceInverse": "#262626",
+    "onSurfaceInverse": "#F7F6F2",
+    "brand": "#3D5A46",
+    "brandPrimary": "#3D5A46",
+    "onBrandPrimary": "#FFFFFF",
+    "brandSecondary": "#2C4233",
+    "onBrandSecondary": "#FFFFFF",
+    "brandTertiary": "#EAEFEA",
+    "onBrandTertiary": "#2C4233",
+    "success": "#3D5A46",
+    "onSuccess": "#FFFFFF",
+    "warning": "#B8860B",
+    "onWarning": "#FFFFFF",
+    "error": "#9E473D",
+    "onError": "#FFFFFF",
+    "info": "#4A4A4A",
+    "onInfo": "#FFFFFF",
+    "border": "#E2E0D8",
+    "borderStrong": "#C2C0B8",
+    "divider": "#E2E0D8"
+  },
+  "typography": {
+    "displayFontFamily": "Plus Jakarta Sans",
+    "textFontFamily": "Geist",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Generous vertical breathing room. Cards never sit flush to edges (always use at least md/lg margin). Clear visual grouping of data points.",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 6,
+    "md": 12,
+    "lg": 20,
+    "pill": 999
+  },
+  "shadow_tier": 1,
+  "navigation": "bottom_tabs",
+  "icon_set": "Phosphor",
+  "glassmorphism": {
+    "enabled": true,
+    "do's": [
+      "Use on the sticky bottom tab bar",
+      "Use as a frosted overlay on the featured Hero card (Return Draft Progress) over the textured background",
+      "Use on sticky section headers during list scroll (e.g., Document Vault)"
+    ],
+    "dont's": [
+      "Never use on dense data rows, form fields, or standard list items",
+      "Never use for error/warning states (use solid colors instead)"
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "Onboarding",
+      "purpose": "Introduce the secure AI tax agent and establish trust before authentication.",
+      "states": {
+        "loading": "Centered spinner",
+        "empty": "N/A",
+        "error": "Error toast on failed auth with retry."
+      },
+      "layout": "Full-bleed imagery on the top half with a gradient scrim fading to surface color. The bottom half contains Plus Jakarta Sans display text, subtext, and sticky Google/Email auth buttons wrapped in safe area."
+    },
+    {
+      "name": "Dashboard",
+      "purpose": "Provide a high-level overview of the current tax year status and actionable tasks.",
+      "states": {
+        "loading": "Skeleton loader for the hero card and quick action widgets",
+        "empty": "No tax year started: Show a welcome illustration and a primary 'Start Return' CTA.",
+        "error": "Unable to load dashboard data: Clear readable message with a 'Retry' button."
+      },
+      "layout": "Modular vertical layout. Top area features a large, glass-overlay hero card over an abstract textured background, displaying the 'Return Draft Builder' 7-step pipeline progress. Below the hero card, a 2-column grid (flexWrap: wrap, space-between) for quick actions (Upload Doc, Review Queue). Bottom section contains a vertical list of recently scanned documents."
+    },
+    {
+      "name": "Document Vault",
+      "purpose": "List and categorize all uploaded and AI-classified tax documents (W-2, 1099, etc.).",
+      "states": {
+        "loading": "List skeletons",
+        "empty": "Secure vault illustration with 'No documents uploaded yet.' and a primary 'Scan Document' CTA.",
+        "error": "Failed to load documents: Readable error + Retry button."
+      },
+      "layout": "Sticky glass header with search/filter tabs. Content is a comfortable vertical list. Each row includes a tinted icon container (brandTertiary), document title, extraction confidence badge (green/yellow chip), and chevron. Use generous padding (16pt) per row."
+    },
+    {
+      "name": "AI Extraction Detail",
+      "purpose": "Show the raw document alongside the AI-extracted fields, allowing human verification.",
+      "states": {
+        "loading": "Spinner over document preview",
+        "empty": "N/A",
+        "error": "Failed to load extraction data: Readable error + Retry button."
+      },
+      "layout": "Split or scrollable view: Top section shows a thumbnail/preview of the document. Bottom section is a clean form-like list of extracted key-value pairs (e.g., Box 1: Wages) with confidence scores next to them. If a field has low confidence, it's highlighted with a warning surface. A sticky CTA at the bottom allows the user to 'Confirm' or 'Edit'."
+    },
+    {
+      "name": "Review Queue",
+      "purpose": "Human-in-the-loop interface to resolve items the AI flagged as risky or missing.",
+      "states": {
+        "loading": "Centered spinner",
+        "empty": "Minimalist desk illustration with 'All caught up! No items need your review.'",
+        "error": "Failed to load queue: Readable error + Retry."
+      },
+      "layout": "Card-based swipeable or sequential stepper layout. One flagged item per screen to focus attention, detailing the discrepancy (e.g., 'Missing 1099-INT based on prior year'). Sticky action buttons at the bottom: 'Skip', 'Upload Missing', or 'Acknowledge'."
+    }
+  ],
+  "images": {
+    "hero_card_bg": {
+      "url": "https://images.unsplash.com/photo-1675251171768-5d49233cc410?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA3MDR8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMHNhZ2UlMjBncmVlbiUyMGFuZCUyMGNyZWFtJTIwdGV4dHVyZSUyMGJhY2tncm91bmR8ZW58MHx8fHwxNzg3ODE5NTY0fDA&ixlib=rb-4.1.0&q=85",
+      "dark": "https://images.unsplash.com/photo-1710438399422-2fca27686bcd?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1ODh8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMGRhcmslMjBzYWdlJTIwZ3JlZW4lMjBhbmQlMjBibGFjayUyMHRleHR1cmUlMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc4NzgxOTU2NHww&ixlib=rb-4.1.0&q=85",
+      "alt": "Abstract flowing curves in shades of light mint green"
+    },
+    "empty_review": {
+      "url": "https://images.unsplash.com/photo-1519219788971-8d9797e0928e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1ODh8MHwxfHNlYXJjaHwxfHxlbXB0eSUyMGRlc2slMjB3aXRoJTIwcGxhbnQlMjBtaW5pbWFsaXNtfGVufDB8fHx8MTc4NzgxOTU2NHww&ixlib=rb-4.1.0&q=85",
+      "alt": "Empty minimalist desk representing no pending review tasks"
+    },
+    "empty_vault": {
+      "url": "https://images.unsplash.com/photo-1634224143538-ce0221abf732?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1OTV8MHwxfHNlYXJjaHwxfHxzZWN1cmUlMjBkaWdpdGFsJTIwdmF1bHQlMjBsb2NrJTIwbWluaW1hbGlzbXxlbnwwfHx8fDE3ODc4MTk1NjR8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "Secure vault lock symbolizing data privacy"
+    },
+    "onboarding_1": {
+      "url": "https://images.unsplash.com/photo-1575318633968-0383e7d07ca0?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1OTN8MHwxfHNlYXJjaHwxfHxjbGVhbiUyMG1pbmltYWxpc3QlMjBvZmZpY2UlMjBkZXNrJTIwZG9jdW1lbnRzfGVufDB8fHx8MTc4NzgxOTU2NHww&ixlib=rb-4.1.0&q=85",
+      "alt": "Clean minimalist office desk setup representing streamlined tax processing"
+    }
+  },
+  "instructions_to_main_agent": [
+    "Strictly follow the color palette. Do NOT use any blue, indigo, or purple. The app relies on a trust-building Sage Green (#3D5A46) and Warm Sand (#F7F6F2) palette.",
+    "Enforce iOS-Native Clean spacing: use generous padding around cards and avoid dense, cramped lists. The AI extraction detail screen should feel like a calm form, not a cluttered spreadsheet.",
+    "Implement glassmorphism on the main hero card on the Dashboard, overlaying the abstract sage green texture background for a premium fintech feel.",
+    "Ensure every screen implements the defined empty, loading, and error states. Do not leave empty states as blank screens.",
+    "For the Document Vault list, use tinted icon containers (brandTertiary background with brandPrimary icon) for each list item to provide immediate visual structure.",
+    "All confidence scores (e.g., 'Box 1 Wages 99%') should be displayed using small pill/chip components with appropriate semantic status colors (success, warning, error) to quickly draw human attention to low-confidence extractions.",
+    "Primary call-to-action buttons (like 'Start Return' or 'Upload Missing') must stick to the bottom of the screen (above the safe area/home indicator), separate from the scrollable content."
+  ]
+}
