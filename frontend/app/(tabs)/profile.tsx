@@ -76,6 +76,10 @@ export default function Profile() {
 
         <Text style={styles.sectionTitle}>App</Text>
         <View style={styles.list}>
+          <Row icon="people-circle" title="Taxpayers" sub="Manage spouse, dependents, and business clients" onPress={() => router.push('/taxpayers')} />
+          <Row icon="paper-plane" title="Handoffs" sub="Track packets sent to your CPA" onPress={() => router.push('/handoffs')} />
+          <Row icon="briefcase" title="CPA directory" sub="Search preparers by state or specialty" onPress={() => router.push('/cpas')} />
+          <Row icon="git-compare" title="Prior-year diff" sub="Compare rule changes across tax years" onPress={() => router.push('/rules-diff')} />
           <Row icon="chatbubbles" title="Tax Assistant" sub="Source-grounded answers · refuses without authority" onPress={() => router.push('/chat')} />
           <Row icon="sparkles" title="Potential items" sub="Detected deductions & credits for your review" onPress={() => router.push('/deductions')} />
           <Row icon="play-circle" title="Interactive demo" sub="Walk through with sample data" onPress={() => router.push('/demo')} />

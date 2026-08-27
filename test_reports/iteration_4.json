@@ -1,0 +1,52 @@
+{
+  "summary": "Iteration 4 tested the 4 new features (Prior-Year Diff Viewer, CPA Directory, Handoff Tracking, Multi-Taxpayer Vault). Backend (pytest, serial mode): added /app/backend/tests/test_iteration4_features.py — 15 tests. Fixed ONE real bug in the process: GET /api/handoffs was not filtering by active taxpayer_id, breaking multi-taxpayer isolation (spouse-generated handoff was visible after switching back to self). Applied a 2-line fix to server.py:1270 to filter by active tp_id (mirrors documents/review_items pattern). After fix: 15/15 iter4 tests PASS. Full backend regression (54 tests across 4 test files) PASSES 100% when run serially (pytest -o addopts=). NOTE: When run with xdist parallel (default addopts=-n auto), 5 tests in test_taxpilot_api.py fail due to LoadScopeScheduling breaking module-scoped fixture dependency chains (test_demo_seed runs on a different worker than test_extract_*) — this is a test-harness issue, not a code regression, and can be fixed by moving `demo/seed` into the `auth` fixture. Verified endpoints: (a) /rules/diff — 2025→2024 returns 7 changes with 4 marked 'changed' (std-ded-single/mfj, mileage-business, savers-credit-agi-single); same-year returns all unchanged; year 2020 & 2030 return 400. (b) /cpas — unfiltered returns 12; q=CA returns exactly 2 (Jamie Chen + Grace Lin); search by name/firm/specialty all work. (c) /taxpayers — lazy self on first GET, POST creates with any of self/spouse/dependent/business/other, /activate switches active, DELETE removes non-self and forbids self (400); active_taxpayer_id tracked in /api/preferences. (d) /handoffs — status defaults to 'generated', accepts generated|shared|opened|commented|closed, rejects 'bogus' (400), unknown id (404). (e) Multi-taxpayer isolation confirmed end-to-end: seed on self → 4 docs; create+activate spouse → 0 docs; disposition + handoff PDF as spouse → 1 handoff for spouse; switch back to self → 4 docs preserved AND 0 handoffs (isolation now correct after fix). Frontend (mobile viewport 390x844, fresh signup): Dashboard shows taxpayer-pill above greeting with user name (testID='taxpayer-pill' ✓); tapping opens modal listing all taxpayers with 'Manage taxpayers' link (testID='manage-tp-btn' ✓). Year-picker modal now includes 'Compare rules across years →' link (testID='open-diff-btn' ✓) that navigates to /rules-diff. /rules-diff: FROM 2025 / TO 2024 shows stats row (4 Changed / 3 Unchanged / 7 Total) and Changed cards with from→to values ($15,000→$14,600, $30,000→$29,200, 70¢→67¢, $39,500→$38,250). Profile: all 4 new rows navigate correctly (Taxpayers→/taxpayers, Handoffs→/handoffs, CPA directory→/cpas, Prior-year diff→/rules-diff). /taxpayers: Self card shows 'Active' pill, + opens bottom-sheet with name input + 4 relationship chips + Create button; created spouse appears, tapping 'Switch to' moves the Active pill to spouse and trash appears only on non-self. /cpas: search bar filters live; typing 'CA' correctly narrows to Jamie + Grace (Rita/others hidden); tapping a pick button sets cpa_email preference and card shows 'Selected' pill. /handoffs: correct empty-state shown for a freshly-created spouse taxpayer (isolation working on the UI too). Zero console errors across all flows. No red screen.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/handoffs", "issue": "FIXED in this iteration — endpoint was not filtering by active taxpayer_id, leaking handoffs across taxpayers under the same user. Root cause: line 1272 filtered only by user_id. Fix: added `tp_id = await get_active_taxpayer_id(user)` and included `taxpayer_id: tp_id` in the mongo filter (same pattern used by /documents, /review-queue, /potential-items)."},
+      {"endpoint": "POST /api/auth/login (same-second re-login)", "issue": "Pre-existing JWT jti/iat collision — carried over from iteration_2/3. Not user-facing; still recommend adding a random jti to make_session_token()."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "global", "issues": ["Pre-existing 'Image style.resizeMode is deprecated' RN-Web warning (non-blocking)."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration4_features.py",
+    "/app/backend/tests/test_iteration3_features.py",
+    "/app/backend/tests/test_new_features.py",
+    "/app/backend/tests/test_taxpilot_api.py",
+    "/app/test_reports/pytest/iter4.xml",
+    "/app/test_reports/pytest/iter4_all.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: pytest.ini currently sets `addopts=-n auto --dist loadscope`. Parallel xdist breaks module-scoped fixture chains in test_taxpilot_api.py (test_demo_seed vs test_extract_*). Either (a) fold demo/seed into the auth fixture so every test class starts self-sufficient, or (b) rely on --dist loadfile/loadscope but ensure each class does not depend on a previous class's side effects. Serial run: 54/54 PASS.",
+    "OPTIONAL: server.py has grown to ~1400 lines. Same 'split into routers/' suggestion as iter2/iter3 — now covers taxpayers/cpas/rules/handoffs too.",
+    "OPTIONAL: Add DB indexes: db.taxpayers.create_index([('user_id',1),('created_at',1)]); db.handoff_audit.create_index([('user_id',1),('taxpayer_id',1),('created_at',-1)]).",
+    "OPTIONAL: RULES_CATALOG and CPA_DIRECTORY are hardcoded in Python — move to Mongo/JSON per-tax-year to align with the 'versioned authority' story the sources screen advertises.",
+    "MINOR (carried over): add random jti to JWT to avoid signup+login same-second DuplicateKeyError."
+  ],
+  "critical_code_review_comments": [
+    "server.py:1270-1272 — BUG FIXED. /handoffs must always filter by taxpayer_id to preserve vault isolation. All other per-taxpayer endpoints (documents, review_items, potential_items dispositions) already do this correctly.",
+    "server.py:1136 — silent fallback to 'other' when relationship is unknown. Consider raising 400 instead of silently coercing (would help API consumers catch typos).",
+    "server.py:1156-1159 — activate does not enforce that only one taxpayer is 'active'; it works because active state lives in preferences.active_taxpayer_id (single value). Model field 'is_active' does not exist — frontend derives active from /preferences. This is correct but slightly non-obvious.",
+    "server.py:1163-1181 — delete_taxpayer cascades over documents/review_items/item_dispositions/handoff_audit — good. But if active_taxpayer_id ends up null (no self somehow), get_active_taxpayer_id will lazy-create one; safe."
+  ],
+  "updated_files": [
+    "/app/backend/server.py",
+    "/app/backend/tests/test_iteration4_features.py",
+    "/app/test_reports/iteration_4.json",
+    "/app/test_reports/pytest/iter4.xml",
+    "/app/test_reports/pytest/iter4_all.xml"
+  ],
+  "success_rate": {"backend": "100% (15/15 iter4 + 54/54 full regression serial)", "frontend": "100% — all 4 new features verified end-to-end on mobile viewport, 0 console errors"},
+  "seed_data_creation": "Per-run unique users (TEST_iter4_*, e2e_i4_*); /api/demo/seed used to populate the self-taxpayer with 4 documents for isolation testing.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend iter4 tests at /app/backend/tests/test_iteration4_features.py — run serially with `EXPO_PUBLIC_BACKEND_URL=<url> pytest /app/backend/tests/test_iteration4_features.py -v -o addopts=`. Frontend testIDs verified: taxpayer-pill, open-diff-btn, manage-tp-btn (in dashboard year & taxpayer modals); taxpayers-screen, add-taxpayer-btn, new-taxpayer-name, new-rel-<key>, create-taxpayer-btn, activate-<id>, remove-<id>, taxpayer-<id>; rules-diff-screen, from-year-btn, to-year-btn, year-from-<yyyy>, year-to-<yyyy>; cpas-screen, cpa-search-input, clear-search, cpa-<id>, pick-<id>; handoffs-screen, handoff-<id>, set-status-<id>-<status>. Multi-taxpayer isolation now fully working after the /handoffs fix. Server.py near 1400 lines — split into routers if next iteration adds more.",
+  "rca_of_issue": "Bug: /api/handoffs was not filtering by active taxpayer_id, so a taxpayer's handoffs leaked to sibling taxpayers under the same user. Reproduction: (1) create user, (2) POST /demo/seed as self, (3) POST /taxpayers spouse + activate, (4) POST /handoff/home_office/pdf as spouse (creates handoff_audit row with taxpayer_id=spouse_id), (5) activate self, (6) GET /handoffs → returned spouse's handoff (BUG). Mitigation applied: server.py:1270-1272 now resolves the active taxpayer_id and includes it in the mongo filter — mirrors the isolation pattern used by /documents, /review-queue, /potential-items dispositions."
+}

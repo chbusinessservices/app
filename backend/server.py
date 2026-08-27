@@ -396,9 +396,11 @@ async def upload_document(
         logging.exception("upload failed")
         raise HTTPException(status_code=500, detail=f"Storage upload failed: {e}")
 
+    tp_id = await get_active_taxpayer_id(user)
     doc = {
         "document_id": document_id,
         "user_id": user["user_id"],
+        "taxpayer_id": tp_id,
         "filename": file.filename,
         "doc_type": doc_type_hint if doc_type_hint in DOC_TYPES else "Other",
         "status": "uploaded",
@@ -407,21 +409,23 @@ async def upload_document(
         "uploaded_at": now_utc().isoformat(),
     }
     await db.documents.insert_one(dict(doc))
-    return DocumentOut(**doc)
+    return DocumentOut(**{k: v for k, v in doc.items() if k in DocumentOut.model_fields})
 
 
 @api_router.get("/documents", response_model=List[DocumentOut])
 async def list_documents(user=Depends(get_current_user)):
-    docs = await db.documents.find({"user_id": user["user_id"]}, {"_id": 0}).sort("uploaded_at", -1).to_list(500)
-    return [DocumentOut(**d) for d in docs]
+    tp_id = await get_active_taxpayer_id(user)
+    docs = await db.documents.find({"user_id": user["user_id"], "taxpayer_id": tp_id}, {"_id": 0}).sort("uploaded_at", -1).to_list(500)
+    return [DocumentOut(**{k: v for k, v in d.items() if k in DocumentOut.model_fields}) for d in docs]
 
 
 @api_router.get("/documents/{document_id}", response_model=DocumentOut)
 async def get_document(document_id: str, user=Depends(get_current_user)):
-    d = await db.documents.find_one({"document_id": document_id, "user_id": user["user_id"]}, {"_id": 0})
+    tp_id = await get_active_taxpayer_id(user)
+    d = await db.documents.find_one({"document_id": document_id, "user_id": user["user_id"], "taxpayer_id": tp_id}, {"_id": 0})
     if not d:
         raise HTTPException(404, "Not found")
-    return DocumentOut(**d)
+    return DocumentOut(**{k: v for k, v in d.items() if k in DocumentOut.model_fields})
 
 
 @api_router.get("/documents/{document_id}/file")
@@ -462,7 +466,8 @@ Flag needs_review=true if any field has confidence < 0.80 or the doc_type is Rec
 
 @api_router.post("/documents/{document_id}/extract", response_model=ExtractionOut)
 async def extract_document(document_id: str, model: str = "claude-sonnet-5", user=Depends(get_current_user)):
-    d = await db.documents.find_one({"document_id": document_id, "user_id": user["user_id"]}, {"_id": 0})
+    tp_id = await get_active_taxpayer_id(user)
+    d = await db.documents.find_one({"document_id": document_id, "user_id": user["user_id"], "taxpayer_id": tp_id}, {"_id": 0})
     if not d:
         raise HTTPException(404, "Not found")
 
@@ -510,6 +515,7 @@ async def extract_document(document_id: str, model: str = "claude-sonnet-5", use
         await db.review_items.insert_one({
             "review_id": uuid.uuid4().hex,
             "user_id": user["user_id"],
+            "taxpayer_id": tp_id,
             "document_id": document_id,
             "title": f"Review {result.doc_type}: {d['filename']}",
             "reason": next((f"Low confidence on '{f.label}' ({int(f.confidence * 100)}%)" for f in fields if f.confidence < 0.80), "Requires human verification"),
@@ -563,10 +569,11 @@ def _fallback_extraction(doc_type: str) -> dict:
 # ---------- Review Queue ----------
 @api_router.get("/review-queue", response_model=List[ReviewItem])
 async def get_review_queue(user=Depends(get_current_user)):
+    tp_id = await get_active_taxpayer_id(user)
     items = await db.review_items.find(
-        {"user_id": user["user_id"], "status": "open"}, {"_id": 0}
+        {"user_id": user["user_id"], "taxpayer_id": tp_id, "status": "open"}, {"_id": 0}
     ).sort("created_at", -1).to_list(200)
-    return [ReviewItem(**i) for i in items]
+    return [ReviewItem(**{k: v for k, v in i.items() if k in ReviewItem.model_fields}) for i in items]
 
 
 class ReviewAction(BaseModel):
@@ -608,9 +615,10 @@ class Preferences(BaseModel):
     consent_7216: bool = False
     consent_7216_at: Optional[str] = None
     consent_7216_revoked_at: Optional[str] = None
+    active_taxpayer_id: Optional[str] = None
 
 
-DEFAULT_PREFS = {"tax_year": 2025, "cpa_email": None, "consent_7216": False, "consent_7216_at": None, "consent_7216_revoked_at": None}
+DEFAULT_PREFS = {"tax_year": 2025, "cpa_email": None, "consent_7216": False, "consent_7216_at": None, "consent_7216_revoked_at": None, "active_taxpayer_id": None}
 
 
 @api_router.get("/preferences", response_model=Preferences)
@@ -777,9 +785,10 @@ async def handoff_pdf(item_id: str, user=Depends(get_current_user)):
     item = next((i for i in POTENTIAL_ITEMS_CATALOG if i["item_id"] == item_id), None)
     if not item:
         raise HTTPException(404, "Unknown item_id")
-    docs = await db.documents.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(50)
+    tp_id = await get_active_taxpayer_id(user)
+    docs = await db.documents.find({"user_id": user["user_id"], "taxpayer_id": tp_id}, {"_id": 0}).to_list(50)
     supporting = [d for d in docs if d.get("doc_type") in item.get("requires", []) or item.get("requires") == []]
-    review_items = await db.review_items.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    review_items = await db.review_items.find({"user_id": user["user_id"], "taxpayer_id": tp_id}, {"_id": 0}).sort("created_at", -1).to_list(50)
     prefs = await db.preferences.find_one({"user_id": user["user_id"]}, {"_id": 0}) or {}
     tax_year = prefs.get("tax_year", 2025)
 
@@ -790,11 +799,15 @@ async def handoff_pdf(item_id: str, user=Depends(get_current_user)):
     await db.handoff_audit.insert_one({
         "handoff_id": handoff_id,
         "user_id": user["user_id"],
+        "taxpayer_id": tp_id,
         "item_id": item_id,
+        "item_title": item.get("title"),
         "docs_count": len(supporting),
         "review_items_count": len(review_items),
         "tax_year": tax_year,
         "cpa_email": prefs.get("cpa_email"),
+        "status": "generated",
+        "comments": [],
         "created_at": now_utc().isoformat(),
     })
 
@@ -810,8 +823,9 @@ async def handoff_pdf(item_id: str, user=Depends(get_current_user)):
 # ---------- Refund Estimator (confidence-gated) ----------
 @api_router.get("/refund/estimate")
 async def refund_estimate(user=Depends(get_current_user)):
-    docs = await db.documents.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(500)
-    open_review = await db.review_items.count_documents({"user_id": user["user_id"], "status": "open"})
+    tp_id = await get_active_taxpayer_id(user)
+    docs = await db.documents.find({"user_id": user["user_id"], "taxpayer_id": tp_id}, {"_id": 0}).to_list(500)
+    open_review = await db.review_items.count_documents({"user_id": user["user_id"], "taxpayer_id": tp_id, "status": "open"})
 
     # Identify blockers (per compliance doc: block on unresolved conflicts / low confidence)
     low_conf_docs, missing_types = [], []
@@ -878,9 +892,10 @@ DISPOSITIONS = {"review", "not_applicable", "need_help", "save_for_pro_review"}
 
 @api_router.get("/potential-items")
 async def potential_items(user=Depends(get_current_user)):
-    docs = await db.documents.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(500)
+    tp_id = await get_active_taxpayer_id(user)
+    docs = await db.documents.find({"user_id": user["user_id"], "taxpayer_id": tp_id}, {"_id": 0}).to_list(500)
     classified_types = {d.get("doc_type") for d in docs if d.get("status") == "classified"}
-    dispositions = await db.item_dispositions.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(500)
+    dispositions = await db.item_dispositions.find({"user_id": user["user_id"], "taxpayer_id": tp_id}, {"_id": 0}).to_list(500)
     disp_map = {d["item_id"]: d for d in dispositions}
 
     out = []
@@ -906,15 +921,17 @@ async def set_disposition(item_id: str, req: DispositionRequest, user=Depends(ge
         raise HTTPException(400, f"disposition must be one of {sorted(DISPOSITIONS)}")
     if not any(i["item_id"] == item_id for i in POTENTIAL_ITEMS_CATALOG):
         raise HTTPException(404, "Unknown item_id")
+    tp_id = await get_active_taxpayer_id(user)
     await db.item_dispositions.update_one(
-        {"user_id": user["user_id"], "item_id": item_id},
-        {"$set": {"user_id": user["user_id"], "item_id": item_id, "disposition": req.disposition, "updated_at": now_utc().isoformat()}},
+        {"user_id": user["user_id"], "taxpayer_id": tp_id, "item_id": item_id},
+        {"$set": {"user_id": user["user_id"], "taxpayer_id": tp_id, "item_id": item_id, "disposition": req.disposition, "updated_at": now_utc().isoformat()}},
         upsert=True,
     )
     if req.disposition == "save_for_pro_review":
         await db.review_items.insert_one({
             "review_id": uuid.uuid4().hex,
             "user_id": user["user_id"],
+            "taxpayer_id": tp_id,
             "document_id": None,
             "title": f"Professional review requested: {item_id}",
             "reason": "User saved this potential item for professional review before any return action.",
@@ -1010,9 +1027,10 @@ PIPELINE_STEPS = [
 
 @api_router.get("/return/status")
 async def return_status(user=Depends(get_current_user)):
-    docs = await db.documents.count_documents({"user_id": user["user_id"]})
-    classified = await db.documents.count_documents({"user_id": user["user_id"], "status": "classified"})
-    open_review = await db.review_items.count_documents({"user_id": user["user_id"], "status": "open"})
+    tp_id = await get_active_taxpayer_id(user)
+    docs = await db.documents.count_documents({"user_id": user["user_id"], "taxpayer_id": tp_id})
+    classified = await db.documents.count_documents({"user_id": user["user_id"], "taxpayer_id": tp_id, "status": "classified"})
+    open_review = await db.review_items.count_documents({"user_id": user["user_id"], "taxpayer_id": tp_id, "status": "open"})
 
     completed = {"collect": docs > 0, "understand": classified > 0, "infer": classified >= 2,
                  "draft": classified >= 3 and open_review == 0,
@@ -1053,11 +1071,239 @@ async def deductions(user=Depends(get_current_user)):
     return {"suggestions": suggestions, "missing": missing}
 
 
+# ---------- Taxpayers (multi-client vault) ----------
+class Taxpayer(BaseModel):
+    taxpayer_id: str
+    user_id: str
+    name: str
+    relationship: str  # self | spouse | dependent | business | other
+    notes: Optional[str] = None
+    created_at: str
+
+
+class CreateTaxpayerRequest(BaseModel):
+    name: str
+    relationship: str = "other"
+    notes: Optional[str] = None
+
+
+async def get_active_taxpayer_id(user) -> str:
+    """Ensure user has a taxpayer, return active id. Lazy-backfills legacy rows on first call."""
+    prefs = await db.preferences.find_one({"user_id": user["user_id"]}, {"_id": 0}) or {}
+    active = prefs.get("active_taxpayer_id")
+    if active:
+        exists = await db.taxpayers.find_one({"taxpayer_id": active, "user_id": user["user_id"]}, {"_id": 0})
+        if exists:
+            return active
+    any_tp = await db.taxpayers.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    if any_tp:
+        tp_id = any_tp["taxpayer_id"]
+    else:
+        tp_id = f"tp_{uuid.uuid4().hex[:12]}"
+        await db.taxpayers.insert_one({
+            "taxpayer_id": tp_id,
+            "user_id": user["user_id"],
+            "name": user.get("name") or "Myself",
+            "relationship": "self",
+            "notes": None,
+            "created_at": now_utc().isoformat(),
+        })
+        # Backfill legacy documents / dispositions / handoffs to this default taxpayer
+        for coll in ("documents", "review_items", "item_dispositions", "handoff_audit"):
+            await db[coll].update_many(
+                {"user_id": user["user_id"], "taxpayer_id": {"$exists": False}},
+                {"$set": {"taxpayer_id": tp_id}},
+            )
+    await db.preferences.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {"user_id": user["user_id"], "active_taxpayer_id": tp_id}},
+        upsert=True,
+    )
+    return tp_id
+
+
+@api_router.get("/taxpayers", response_model=List[Taxpayer])
+async def list_taxpayers(user=Depends(get_current_user)):
+    await get_active_taxpayer_id(user)  # ensure default exists
+    items = await db.taxpayers.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", 1).to_list(50)
+    return [Taxpayer(**i) for i in items]
+
+
+@api_router.post("/taxpayers", response_model=Taxpayer)
+async def create_taxpayer(req: CreateTaxpayerRequest, user=Depends(get_current_user)):
+    if not req.name.strip():
+        raise HTTPException(400, "name required")
+    rel = req.relationship if req.relationship in {"self", "spouse", "dependent", "business", "other"} else "other"
+    tp = {
+        "taxpayer_id": f"tp_{uuid.uuid4().hex[:12]}",
+        "user_id": user["user_id"],
+        "name": req.name.strip(),
+        "relationship": rel,
+        "notes": req.notes,
+        "created_at": now_utc().isoformat(),
+    }
+    await db.taxpayers.insert_one(dict(tp))
+    return Taxpayer(**tp)
+
+
+@api_router.post("/taxpayers/{taxpayer_id}/activate")
+async def activate_taxpayer(taxpayer_id: str, user=Depends(get_current_user)):
+    tp = await db.taxpayers.find_one({"taxpayer_id": taxpayer_id, "user_id": user["user_id"]}, {"_id": 0})
+    if not tp:
+        raise HTTPException(404, "Taxpayer not found")
+    await db.preferences.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {"user_id": user["user_id"], "active_taxpayer_id": taxpayer_id}},
+        upsert=True,
+    )
+    return {"ok": True, "active_taxpayer_id": taxpayer_id}
+
+
+@api_router.delete("/taxpayers/{taxpayer_id}")
+async def delete_taxpayer(taxpayer_id: str, user=Depends(get_current_user)):
+    tp = await db.taxpayers.find_one({"taxpayer_id": taxpayer_id, "user_id": user["user_id"]}, {"_id": 0})
+    if not tp:
+        raise HTTPException(404, "Not found")
+    if tp.get("relationship") == "self":
+        raise HTTPException(400, "Cannot delete the default 'self' taxpayer")
+    # Reassign / clean up related rows
+    for coll in ("documents", "review_items", "item_dispositions", "handoff_audit"):
+        await db[coll].delete_many({"user_id": user["user_id"], "taxpayer_id": taxpayer_id})
+    await db.taxpayers.delete_one({"taxpayer_id": taxpayer_id, "user_id": user["user_id"]})
+    # If it was active, switch back to self
+    prefs = await db.preferences.find_one({"user_id": user["user_id"]}, {"_id": 0}) or {}
+    if prefs.get("active_taxpayer_id") == taxpayer_id:
+        self_tp = await db.taxpayers.find_one({"user_id": user["user_id"], "relationship": "self"}, {"_id": 0})
+        await db.preferences.update_one(
+            {"user_id": user["user_id"]},
+            {"$set": {"active_taxpayer_id": self_tp["taxpayer_id"] if self_tp else None}},
+        )
+    return {"ok": True}
+
+
+# ---------- Rule Diff Viewer (prior-year deltas) ----------
+RULES_CATALOG: Dict[int, List[dict]] = {
+    2025: [
+        {"rule_id": "std-ded-single", "authority": "Publication 17", "topic": "Standard deduction (single)", "value": "$15,000", "notes": "Base amount for single filers."},
+        {"rule_id": "std-ded-mfj", "authority": "Publication 17", "topic": "Standard deduction (MFJ)", "value": "$30,000", "notes": "Married filing jointly base."},
+        {"rule_id": "medical-agi-floor", "authority": "Publication 502", "topic": "Medical AGI floor", "value": "7.5%", "notes": "Threshold before medical expenses become deductible."},
+        {"rule_id": "mileage-business", "authority": "Publication 463", "topic": "Business mileage rate", "value": "70¢ / mile", "notes": "Standard business mileage rate."},
+        {"rule_id": "aotc-max", "authority": "Publication 970", "topic": "American Opportunity Credit (max)", "value": "$2,500", "notes": "40% refundable up to $1,000."},
+        {"rule_id": "student-loan-int-cap", "authority": "Publication 970", "topic": "Student loan interest cap", "value": "$2,500", "notes": "Above-the-line, income-phased."},
+        {"rule_id": "savers-credit-agi-single", "authority": "Form 8880 Instructions", "topic": "Saver's Credit AGI cap (single)", "value": "$39,500", "notes": "AGI limit for Retirement Savings Contributions Credit."},
+    ],
+    2024: [
+        {"rule_id": "std-ded-single", "authority": "Publication 17", "topic": "Standard deduction (single)", "value": "$14,600"},
+        {"rule_id": "std-ded-mfj", "authority": "Publication 17", "topic": "Standard deduction (MFJ)", "value": "$29,200"},
+        {"rule_id": "medical-agi-floor", "authority": "Publication 502", "topic": "Medical AGI floor", "value": "7.5%"},
+        {"rule_id": "mileage-business", "authority": "Publication 463", "topic": "Business mileage rate", "value": "67¢ / mile"},
+        {"rule_id": "aotc-max", "authority": "Publication 970", "topic": "American Opportunity Credit (max)", "value": "$2,500"},
+        {"rule_id": "student-loan-int-cap", "authority": "Publication 970", "topic": "Student loan interest cap", "value": "$2,500"},
+        {"rule_id": "savers-credit-agi-single", "authority": "Form 8880 Instructions", "topic": "Saver's Credit AGI cap (single)", "value": "$38,250"},
+    ],
+    2023: [
+        {"rule_id": "std-ded-single", "authority": "Publication 17", "topic": "Standard deduction (single)", "value": "$13,850"},
+        {"rule_id": "std-ded-mfj", "authority": "Publication 17", "topic": "Standard deduction (MFJ)", "value": "$27,700"},
+        {"rule_id": "medical-agi-floor", "authority": "Publication 502", "topic": "Medical AGI floor", "value": "7.5%"},
+        {"rule_id": "mileage-business", "authority": "Publication 463", "topic": "Business mileage rate", "value": "65.5¢ / mile"},
+        {"rule_id": "aotc-max", "authority": "Publication 970", "topic": "American Opportunity Credit (max)", "value": "$2,500"},
+        {"rule_id": "student-loan-int-cap", "authority": "Publication 970", "topic": "Student loan interest cap", "value": "$2,500"},
+        {"rule_id": "savers-credit-agi-single", "authority": "Form 8880 Instructions", "topic": "Saver's Credit AGI cap (single)", "value": "$36,500"},
+    ],
+}
+
+
+@api_router.get("/rules/diff")
+async def rules_diff(from_year: int, to_year: int, user=Depends(get_current_user)):
+    if from_year not in RULES_CATALOG or to_year not in RULES_CATALOG:
+        raise HTTPException(400, "Years must be in 2023, 2024, 2025")
+    fr = {r["rule_id"]: r for r in RULES_CATALOG[from_year]}
+    to = {r["rule_id"]: r for r in RULES_CATALOG[to_year]}
+    changes = []
+    for rid, r_from in fr.items():
+        r_to = to.get(rid)
+        if not r_to:
+            changes.append({"rule_id": rid, "topic": r_from["topic"], "authority": r_from["authority"], "from_value": r_from["value"], "to_value": None, "change": "removed"})
+        elif r_from["value"] != r_to["value"]:
+            changes.append({"rule_id": rid, "topic": r_from["topic"], "authority": r_from["authority"], "from_value": r_from["value"], "to_value": r_to["value"], "change": "changed"})
+        else:
+            changes.append({"rule_id": rid, "topic": r_from["topic"], "authority": r_from["authority"], "from_value": r_from["value"], "to_value": r_to["value"], "change": "unchanged"})
+    for rid, r_to in to.items():
+        if rid not in fr:
+            changes.append({"rule_id": rid, "topic": r_to["topic"], "authority": r_to["authority"], "from_value": None, "to_value": r_to["value"], "change": "added"})
+    return {"from_year": from_year, "to_year": to_year, "changes": changes}
+
+
+# ---------- CPA Directory ----------
+CPA_DIRECTORY = [
+    {"cpa_id": "cpa_001", "name": "Jamie Chen, CPA", "firm": "Northwest Tax Partners", "email": "jamie.chen@nwtaxpartners.com", "phone": "+1 (415) 555-0182", "license_state": "CA", "license_number": "CA-CPA-138221", "credentials": ["CPA", "PFS"], "specialties": ["Individual", "Self-employed", "K-1"]},
+    {"cpa_id": "cpa_002", "name": "Rita Alvarez, EA", "firm": "Alvarez Advisory", "email": "rita@alvarez-tax.com", "phone": "+1 (312) 555-0113", "license_state": "IL", "license_number": "IL-EA-84019", "credentials": ["EA"], "specialties": ["Small business", "S-corp"]},
+    {"cpa_id": "cpa_003", "name": "Marcus Boone, CPA", "firm": "Boone & Cole", "email": "mboone@booneandcole.com", "phone": "+1 (212) 555-0164", "license_state": "NY", "license_number": "NY-CPA-071554", "credentials": ["CPA", "CFP"], "specialties": ["High-net-worth", "Trusts"]},
+    {"cpa_id": "cpa_004", "name": "Priya Rao, CPA", "firm": "Rao Tax Group", "email": "priya@raotax.com", "phone": "+1 (206) 555-0176", "license_state": "WA", "license_number": "WA-CPA-32189", "credentials": ["CPA"], "specialties": ["Individual", "Foreign income"]},
+    {"cpa_id": "cpa_005", "name": "David Kim, CPA", "firm": "Kim & Partners", "email": "dkim@kimpartners.com", "phone": "+1 (617) 555-0148", "license_state": "MA", "license_number": "MA-CPA-118344", "credentials": ["CPA"], "specialties": ["Freelance", "1099-NEC"]},
+    {"cpa_id": "cpa_006", "name": "Elena Rossi, EA", "firm": "Rossi Tax Services", "email": "elena@rossitax.com", "phone": "+1 (305) 555-0177", "license_state": "FL", "license_number": "FL-EA-19822", "credentials": ["EA"], "specialties": ["Real estate", "Rentals"]},
+    {"cpa_id": "cpa_007", "name": "Sam Patel, CPA", "firm": "Patel Advisory", "email": "sam@pateladvisory.com", "phone": "+1 (972) 555-0121", "license_state": "TX", "license_number": "TX-CPA-92180", "credentials": ["CPA", "CGMA"], "specialties": ["Business", "Multi-state"]},
+    {"cpa_id": "cpa_008", "name": "Nora Whitfield, CPA", "firm": "Whitfield Tax", "email": "nora@whitfieldtax.com", "phone": "+1 (720) 555-0139", "license_state": "CO", "license_number": "CO-CPA-72014", "credentials": ["CPA"], "specialties": ["Crypto", "Investments"]},
+    {"cpa_id": "cpa_009", "name": "Andre Duval, EA", "firm": "Duval Enrolled Agents", "email": "andre@duval-ea.com", "phone": "+1 (503) 555-0155", "license_state": "OR", "license_number": "OR-EA-45782", "credentials": ["EA"], "specialties": ["IRS representation", "Amended returns"]},
+    {"cpa_id": "cpa_010", "name": "Grace Lin, CPA", "firm": "Lin Tax Studio", "email": "grace@lintaxstudio.com", "phone": "+1 (408) 555-0129", "license_state": "CA", "license_number": "CA-CPA-149022", "credentials": ["CPA", "PFS"], "specialties": ["Individual", "Equity comp"]},
+    {"cpa_id": "cpa_011", "name": "Ben Fischer, CPA", "firm": "Fischer & Ross", "email": "ben@fischerandross.com", "phone": "+1 (703) 555-0161", "license_state": "VA", "license_number": "VA-CPA-88110", "credentials": ["CPA"], "specialties": ["Federal contractors", "Military"]},
+    {"cpa_id": "cpa_012", "name": "Aisha Bello, EA", "firm": "Bello Tax Advisors", "email": "aisha@bellotax.com", "phone": "+1 (404) 555-0143", "license_state": "GA", "license_number": "GA-EA-30291", "credentials": ["EA"], "specialties": ["First-time filers", "Students"]},
+]
+
+
+@api_router.get("/cpas")
+async def list_cpas(q: Optional[str] = None, user=Depends(get_current_user)):
+    q_l = (q or "").lower().strip()
+    results = CPA_DIRECTORY
+    if q_l:
+        results = [c for c in CPA_DIRECTORY if q_l in c["name"].lower()
+                   or q_l in c["firm"].lower()
+                   or q_l in c["license_state"].lower()
+                   or any(q_l in s.lower() for s in c["specialties"])]
+    return {"cpas": results, "count": len(results)}
+
+
+# ---------- Handoff Tracking ----------
+HANDOFF_STATUSES = {"generated", "shared", "opened", "commented", "closed"}
+
+
+@api_router.get("/handoffs")
+async def list_handoffs(user=Depends(get_current_user)):
+    tp_id = await get_active_taxpayer_id(user)
+    items = await db.handoff_audit.find({"user_id": user["user_id"], "taxpayer_id": tp_id}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    for it in items:
+        it.setdefault("status", "generated")
+        it.setdefault("comments", [])
+    return {"handoffs": items}
+
+
+class HandoffStatusRequest(BaseModel):
+    status: str
+    comment: Optional[str] = None
+
+
+@api_router.post("/handoffs/{handoff_id}/status")
+async def update_handoff(handoff_id: str, req: HandoffStatusRequest, user=Depends(get_current_user)):
+    if req.status not in HANDOFF_STATUSES:
+        raise HTTPException(400, f"status must be one of {sorted(HANDOFF_STATUSES)}")
+    h = await db.handoff_audit.find_one({"handoff_id": handoff_id, "user_id": user["user_id"]}, {"_id": 0})
+    if not h:
+        raise HTTPException(404, "Not found")
+    updates: Dict[str, Any] = {"status": req.status, "updated_at": now_utc().isoformat()}
+    if req.comment:
+        comments = h.get("comments") or []
+        comments.append({"text": req.comment, "at": now_utc().isoformat()})
+        updates["comments"] = comments
+    await db.handoff_audit.update_one({"handoff_id": handoff_id}, {"$set": updates})
+    return {"ok": True, "status": req.status}
+
+
 # ---------- Demo Seed ----------
 @api_router.post("/demo/seed")
 async def demo_seed(user=Depends(get_current_user)):
-    await db.documents.delete_many({"user_id": user["user_id"], "is_demo": True})
-    await db.review_items.delete_many({"user_id": user["user_id"], "is_demo": True})
+    tp_id = await get_active_taxpayer_id(user)
+    await db.documents.delete_many({"user_id": user["user_id"], "taxpayer_id": tp_id, "is_demo": True})
+    await db.review_items.delete_many({"user_id": user["user_id"], "taxpayer_id": tp_id, "is_demo": True})
 
     samples = [
         {"filename": "W2_AcmeCorp_2025.pdf", "doc_type": "W-2", "status": "classified"},
@@ -1072,6 +1318,7 @@ async def demo_seed(user=Depends(get_current_user)):
         doc = {
             "document_id": did,
             "user_id": user["user_id"],
+            "taxpayer_id": tp_id,
             "filename": s["filename"],
             "doc_type": s["doc_type"],
             "status": s["status"],
@@ -1087,6 +1334,7 @@ async def demo_seed(user=Depends(get_current_user)):
             await db.review_items.insert_one({
                 "review_id": uuid.uuid4().hex,
                 "user_id": user["user_id"],
+                "taxpayer_id": tp_id,
                 "document_id": did,
                 "title": "Review Q2 Receipts",
                 "reason": "Low confidence on 'Category' (74%)",
@@ -1098,6 +1346,7 @@ async def demo_seed(user=Depends(get_current_user)):
     await db.review_items.insert_one({
         "review_id": uuid.uuid4().hex,
         "user_id": user["user_id"],
+        "taxpayer_id": tp_id,
         "document_id": None,
         "title": "Missing K-1",
         "reason": "K-1 expected based on prior year but not yet uploaded",

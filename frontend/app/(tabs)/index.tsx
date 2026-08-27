@@ -11,7 +11,8 @@ import { api } from '@/src/api';
 type Step = { key: string; name: string; description: string; completed: boolean };
 type Status = { steps: Step[]; counts: { documents: number; classified: number; open_review: number }; estimated_savings_usd: number; estimated_time_saved_min: number };
 type Refund = { status: 'estimated' | 'blocked' | 'insufficient_data'; amount: number | null; confidence_tier: string; blockers: { code: string; message: string }[]; disclaimer: string };
-type Prefs = { tax_year: number; cpa_email: string | null; consent_7216: boolean; consent_7216_at: string | null; consent_7216_revoked_at: string | null };
+type Prefs = { tax_year: number; cpa_email: string | null; consent_7216: boolean; consent_7216_at: string | null; consent_7216_revoked_at: string | null; active_taxpayer_id: string | null };
+type Taxpayer = { taxpayer_id: string; name: string; relationship: string };
 
 const TAX_YEARS = [2025, 2024, 2023];
 
@@ -21,19 +22,22 @@ export default function Dashboard() {
   const [status, setStatus] = useState<Status | null>(null);
   const [refund, setRefund] = useState<Refund | null>(null);
   const [prefs, setPrefs] = useState<Prefs | null>(null);
+  const [taxpayers, setTaxpayers] = useState<Taxpayer[]>([]);
   const [yearPicker, setYearPicker] = useState(false);
+  const [tpPicker, setTpPicker] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [seeding, setSeeding] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [s, r, p] = await Promise.all([
+      const [s, r, p, tps] = await Promise.all([
         api<Status>('/return/status'),
         api<Refund>('/refund/estimate'),
         api<Prefs>('/preferences'),
+        api<Taxpayer[]>('/taxpayers'),
       ]);
-      setStatus(s); setRefund(r); setPrefs(p);
+      setStatus(s); setRefund(r); setPrefs(p); setTaxpayers(tps);
     } catch {}
     setLoading(false); setRefreshing(false);
   }, []);
@@ -45,6 +49,16 @@ export default function Dashboard() {
       setPrefs(p);
     } catch {}
   }
+
+  async function switchTaxpayer(id: string) {
+    setTpPicker(false);
+    try {
+      await api(`/taxpayers/${id}/activate`, { method: 'POST' });
+      await load();
+    } catch {}
+  }
+
+  const activeTaxpayer = taxpayers.find(t => t.taxpayer_id === prefs?.active_taxpayer_id) || taxpayers[0];
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
@@ -60,7 +74,12 @@ export default function Dashboard() {
     <View style={styles.root} testID="dashboard-screen">
       <SafeAreaView edges={['top']} style={{ backgroundColor: THEME.surface }}>
         <View style={styles.header}>
-          <View>
+          <View style={{ flex: 1 }}>
+            <Pressable onPress={() => setTpPicker(true)} style={styles.tpPill} testID="taxpayer-pill">
+              <Ionicons name="people-circle" size={14} color={THEME.brandPrimary} />
+              <Text style={styles.tpName}>{activeTaxpayer?.name || 'Myself'}</Text>
+              <Ionicons name="swap-horizontal" size={12} color={THEME.brandPrimary} />
+            </Pressable>
             <Text style={styles.hi}>Hi, {user?.name || 'there'} 👋</Text>
             <Pressable onPress={() => setYearPicker(true)} style={styles.yearBtn} testID="tax-year-pill">
               <Ionicons name="calendar" size={12} color={THEME.brandPrimary} />
@@ -197,6 +216,32 @@ export default function Dashboard() {
                 {prefs?.tax_year === y && <Ionicons name="checkmark" size={18} color={THEME.brandPrimary} />}
               </Pressable>
             ))}
+            <Pressable onPress={() => { setYearPicker(false); router.push('/rules-diff'); }} style={styles.diffLink} testID="open-diff-btn">
+              <Ionicons name="git-compare" size={14} color={THEME.brandPrimary} />
+              <Text style={styles.diffLinkText}>Compare rules across years</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Modal>
+
+      <Modal transparent visible={tpPicker} animationType="fade" onRequestClose={() => setTpPicker(false)}>
+        <Pressable style={styles.modalBackdrop} onPress={() => setTpPicker(false)}>
+          <View style={styles.modalCard} onStartShouldSetResponder={() => true}>
+            <Text style={styles.modalTitle}>Switch taxpayer</Text>
+            <Text style={styles.modalSub}>Each taxpayer has isolated documents, review, and consent.</Text>
+            {taxpayers.map(t => (
+              <Pressable key={t.taxpayer_id} style={[styles.yearRow, prefs?.active_taxpayer_id === t.taxpayer_id && styles.yearRowActive]} onPress={() => switchTaxpayer(t.taxpayer_id)} testID={`switch-tp-${t.taxpayer_id}`}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.yearRowText, prefs?.active_taxpayer_id === t.taxpayer_id && { color: THEME.brandPrimary, fontWeight: '700' }]}>{t.name}</Text>
+                  <Text style={styles.tpSub}>{t.relationship}</Text>
+                </View>
+                {prefs?.active_taxpayer_id === t.taxpayer_id && <Ionicons name="checkmark" size={18} color={THEME.brandPrimary} />}
+              </Pressable>
+            ))}
+            <Pressable onPress={() => { setTpPicker(false); router.push('/taxpayers'); }} style={styles.diffLink} testID="manage-tp-btn">
+              <Ionicons name="settings" size={14} color={THEME.brandPrimary} />
+              <Text style={styles.diffLinkText}>Manage taxpayers</Text>
+            </Pressable>
           </View>
         </Pressable>
       </Modal>
@@ -274,4 +319,9 @@ const styles = StyleSheet.create({
   yearRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: SPACING.md, paddingHorizontal: SPACING.md, borderRadius: RADIUS.md, marginTop: 2 },
   yearRowActive: { backgroundColor: THEME.brandTertiary },
   yearRowText: { fontSize: 16, color: THEME.onSurface },
+  tpPill: { flexDirection: 'row', gap: 4, alignItems: 'center', backgroundColor: THEME.brandTertiary, paddingHorizontal: SPACING.md, paddingVertical: 4, borderRadius: RADIUS.pill, alignSelf: 'flex-start', marginBottom: 6 },
+  tpName: { fontSize: 12, fontWeight: '700', color: THEME.brandPrimary, letterSpacing: 0.3 },
+  tpSub: { fontSize: 11, color: THEME.onSurfaceTertiary, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 2 },
+  diffLink: { flexDirection: 'row', gap: 6, alignItems: 'center', justifyContent: 'center', paddingVertical: SPACING.md, marginTop: SPACING.sm, borderTopWidth: 1, borderTopColor: THEME.border },
+  diffLinkText: { color: THEME.brandPrimary, fontSize: 13, fontWeight: '600' },
 });
