@@ -1,0 +1,12 @@
+{
+  "previewPort": 3000,
+  "healthPath": "/",
+  "startCommand": "docker compose -f docker-compose.base44.yml up -d",
+  "secrets": [
+    {
+      "name": "EMERGENT_LLM_KEY",
+      "description": "Emergent integrations API key for the LLM chat + object storage service (integrations.emergentagent.com). Already present in backend/.env from the repo; provide via dashboard to override.",
+      "requiredAtBoot": false
+    }
+  ]
+}
