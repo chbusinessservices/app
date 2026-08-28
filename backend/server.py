@@ -19,6 +19,14 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 
 from emergentintegrations.llm.chat import LlmChat, UserMessage
+from tax_validation.models import (
+    MedicalClaimRequest,
+    MedicalValidationResult,
+    Calculation as MedicalCalculation,
+    ViolationStatus,
+    RiskTier,
+)
+from tax_validation.rule_engine import validate_medical, MEDICAL_RULES
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -1196,6 +1204,106 @@ async def delete_taxpayer(taxpayer_id: str, user=Depends(get_current_user)):
             {"$set": {"active_taxpayer_id": self_tp["taxpayer_id"] if self_tp else None}},
         )
     return {"ok": True}
+
+
+# ---------- Deterministic Tax-Position Validation (Pub. 502) ----------
+# The LLM may propose a medical deduction, but a versioned rule engine decides
+# whether facts + authority support it. The validator returns at most
+# "potentially_supported"; only an authenticated reviewer approval promotes a
+# claim to "supported" and unblocks filing. Every validation is recorded in an
+# append-only audit trail (sources, rule version, facts, checks, flags,
+# calculation, model not included here — this endpoint is deterministic-only).
+
+
+@api_router.post("/validation/medical", response_model=MedicalValidationResult)
+async def validate_medical_claim(req: MedicalClaimRequest, user=Depends(get_current_user)):
+    if not req.claim_id:
+        req.claim_id = f"claim_{uuid.uuid4().hex[:12]}"
+    tp_id = await get_active_taxpayer_id(user)
+
+    result = validate_medical(req)
+    audit_id = uuid.uuid4().hex
+    result.audit_event_id = audit_id
+
+    # Immutable, append-only evidence of the decision. Tokenizes nothing extra:
+    # the request carries only amounts the client supplied, no raw SSNs.
+    await db.validation_audit.insert_one({
+        "audit_id": audit_id,
+        "user_id": user["user_id"],
+        "taxpayer_id": tp_id,
+        "claim_id": result.claim_id,
+        "tax_year": result.tax_year,
+        "jurisdiction": result.jurisdiction.model_dump(),
+        "category": result.category,
+        "form": result.form,
+        "status": result.status.value,
+        "risk_tier": result.risk_tier.value,
+        "flags": result.flags,
+        "missing_facts": result.missing_facts,
+        "source_status": result.source_status,
+        "rule_ref": result.rule_ref.model_dump() if result.rule_ref else None,
+        "calculation": result.calculation.model_dump(),
+        "request_facts": [f.model_dump() for f in req.source_facts],
+        "review_required": result.review_required,
+        "filing_blocked": result.filing_blocked,
+        "created_at": now_utc().isoformat(),
+    })
+
+    # Route high-risk / unresolved items to the human review queue.
+    if result.review_required:
+        await db.review_items.insert_one({
+            "review_id": uuid.uuid4().hex,
+            "user_id": user["user_id"],
+            "taxpayer_id": tp_id,
+            "document_id": None,
+            "title": f"Pub. 502 medical validation: {result.claim_id} ({result.status.value})",
+            "reason": result.missing_facts[0] if result.missing_facts else (
+                f"Potentially deductible ${result.calculation.potentially_deductible} "
+                f"requires professional review before any return-field update."
+            ),
+            "severity": "warning",
+            "status": "open",
+            "created_at": now_utc().isoformat(),
+        })
+
+    return result
+
+
+@api_router.get("/validation/medical/history", response_model=List[dict])
+async def validation_history(user=Depends(get_current_user)):
+    tp_id = await get_active_taxpayer_id(user)
+    items = await db.validation_audit.find(
+        {"user_id": user["user_id"], "taxpayer_id": tp_id}, {"_id": 0}
+    ).sort("created_at", -1).to_list(100)
+    return items
+
+
+# Transparency: the versioned Pub. 502 medical threshold rules the engine uses.
+@api_router.get("/validation/rules/medical")
+async def medical_rules(user=Depends(get_current_user)):
+    return {
+        "rules": [
+            {
+                "tax_year": year,
+                "rate": str(r["rate"]),
+                "source": r["source"],
+                "revision": r["revision"],
+                "page_or_section": r["page_or_section"],
+                "hash": r["hash"],
+                "status": "approved",
+            }
+            for year, r in sorted(MEDICAL_RULES.items())
+        ],
+        "line_mapping": {
+            "line_1": "medical_and_dental_expenses",
+            "line_2": "adjusted_gross_income",
+            "line_3": "agi_times_rate",
+            "line_4": "line_1_minus_line_3_clamped_at_zero",
+        },
+        "note": "Threshold rate is versioned by tax year. The validator never "
+                "trusts an LLM-supplied rate; it confirms the rate against this "
+                "registry for the requested return year.",
+    }
 
 
 # ---------- Rule Diff Viewer (prior-year deltas) ----------

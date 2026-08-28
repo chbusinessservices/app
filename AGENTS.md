@@ -26,6 +26,14 @@ Preview: host port 3000 (frontend). Backend API: host port 8000.
 - Frontend `EXPO_PUBLIC_BACKEND_URL` is set via compose to `https://8000-${BASE44_PUBLIC_HOST_SUFFIX}` so the web client reaches the backend's public origin. The backend has permissive CORS (`allow_origins=["*"]`).
 - `MONGO_URL` is overridden in compose to `mongodb://mongo:27017` (the repo .env points at localhost).
 
+## Deterministic tax-position validation
+- `backend/tax_validation/` is the versioned rule engine that grades AI-proposed deductions. The LLM may propose; the engine decides.
+- `POST /api/validation/medical` — Pub. 502 medical-expense validator. Deterministic Decimal math: `max(0, paid_medical − reimbursements − AGI × approved_rate)`. Returns one of five statuses — `supported` (only via reviewer approval), `potentially_supported`, `unsupported`, `contradicted`, `outdated`, plus `human_review_required`. Medical is always HIGH risk, so the engine tops out at `potentially_supported`; only an authenticated reviewer can promote to `supported` and unblock filing (`filing_blocked` is true until then).
+- Hallucination guards built in: rejects an LLM-supplied threshold rate that differs from the approved tax-year rule (`THRESHOLD_RATE_MISMATCH`), validates the AGI base, and refuses a definitive answer for a tax year with no approved rule (`outdated`).
+- `GET /api/validation/rules/medical` — transparent versioned Pub. 502 threshold rules (2023–2025, 7.5%). The engine never trusts an LLM-supplied rate; it confirms against this registry.
+- `GET /api/validation/medical/history` — append-only `validation_audit` records (sources, rule version, facts, flags, calculation, missing facts).
+- Every validation writes an immutable `db.validation_audit` record and, when `review_required`, opens a human-review item in `db.review_items`.
+
 ## Verification
 - `curl -sf http://localhost:8000/api/` → `{"app":"TaxPilot AI","status":"ok"}`
 - `curl -sf -H "Host: external.example" http://localhost:3000/` → HTML (Expo web).
