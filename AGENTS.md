@@ -33,6 +33,13 @@ Preview: host port 3000 (frontend). Backend API: host port 8000.
 - `GET /api/validation/rules/medical` — transparent versioned Pub. 502 threshold rules (2023–2025, 7.5%). The engine never trusts an LLM-supplied rate; it confirms against this registry.
 - `GET /api/validation/medical/history` — append-only `validation_audit` records (sources, rule version, facts, flags, calculation, missing facts).
 - Every validation writes an immutable `db.validation_audit` record and, when `review_required`, opens a human-review item in `db.review_items`.
+- **Reviewer approval**: `POST /api/validation/medical/{claim_id}/decision` (`{decision: approve|reject, rationale}`). The reviewer is the authenticated user (identity bound to the session); the model cannot approve its own claims. Only a `potentially_supported` claim (all deterministic checks passed) can be approved — approving an unsupported/contradicted/outdated claim returns 409. Approval promotes the claim to `supported` and `filing_blocked=false`; rejection keeps `filing_blocked=true`. Re-validating the same `claim_id` with a changed material value appends a new validation event and re-blocks (re-review required on material change).
+- `GET /api/validation/medical/{claim_id}` returns the effective state (the newest audit record for the claim).
+
+## Tamper-evident audit trail
+- `backend/tax_validation/audit.py` chains every `validation_audit` record cryptographically: each record stores `prev_hash` (previous tenant record's `record_hash`, or all-zero genesis) and `record_hash = sha256(prev_hash || canonical(payload))`. In-place edits/deletions/reorderings are detectable.
+- `GET /api/audit/chain/verify` walks the active taxpayer's records in order and reports `valid`, `verified`/`total`, and `broken_at` (first index where the hash or link fails) plus per-record status. Verified: a clean validation+approval chain passes; flipping one record's `status` in-place makes `broken_at` point at it with `hash_ok=false`.
+- Legacy (pre-chain) records carry no `record_hash`; chaining effectively (re)starts at the first new hashed record when the last tenant record predates the chain.
 
 ## Verification
 - `curl -sf http://localhost:8000/api/` → `{"app":"TaxPilot AI","status":"ok"}`
