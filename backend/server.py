@@ -19,6 +19,15 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 
 from emergentintegrations.llm.chat import LlmChat, UserMessage
+from tax_validation.models import (
+    MedicalClaimRequest,
+    MedicalValidationResult,
+    Calculation as MedicalCalculation,
+    ViolationStatus,
+    RiskTier,
+)
+from tax_validation.rule_engine import validate_medical, MEDICAL_RULES
+from tax_validation.audit import compute_record_hash, verify_chain, GENESIS_HASH
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -1196,6 +1205,246 @@ async def delete_taxpayer(taxpayer_id: str, user=Depends(get_current_user)):
             {"$set": {"active_taxpayer_id": self_tp["taxpayer_id"] if self_tp else None}},
         )
     return {"ok": True}
+
+
+# ---------- Deterministic Tax-Position Validation (Pub. 502) ----------
+# The LLM may propose a medical deduction, but a versioned rule engine decides
+# whether facts + authority support it. The validator returns at most
+# "potentially_supported"; only an authenticated reviewer approval promotes a
+# claim to "supported" and unblocks filing. Every validation is recorded in an
+# append-only audit trail (sources, rule version, facts, checks, flags,
+# calculation, model not included here — this endpoint is deterministic-only).
+
+
+@api_router.post("/validation/medical", response_model=MedicalValidationResult)
+async def validate_medical_claim(req: MedicalClaimRequest, user=Depends(get_current_user)):
+    if not req.claim_id:
+        req.claim_id = f"claim_{uuid.uuid4().hex[:12]}"
+    tp_id = await get_active_taxpayer_id(user)
+
+    result = validate_medical(req)
+    audit_id = uuid.uuid4().hex
+    result.audit_event_id = audit_id
+
+    # Immutable, append-only, hash-chained evidence of the decision. Carries
+    # only amounts the client supplied; no raw SSNs or sensitive taxpayer PII.
+    await _append_validation_audit(user["user_id"], tp_id, {
+        "audit_id": audit_id,
+        "event_type": "validation",
+        "user_id": user["user_id"],
+        "taxpayer_id": tp_id,
+        "claim_id": result.claim_id,
+        "tax_year": result.tax_year,
+        "jurisdiction": result.jurisdiction.model_dump(),
+        "category": result.category,
+        "form": result.form,
+        "status": result.status.value,
+        "risk_tier": result.risk_tier.value,
+        "flags": result.flags,
+        "missing_facts": result.missing_facts,
+        "source_status": result.source_status,
+        "rule_ref": result.rule_ref.model_dump() if result.rule_ref else None,
+        "calculation": result.calculation.model_dump(),
+        "request_facts": [f.model_dump() for f in req.source_facts],
+        "review_required": result.review_required,
+        "filing_blocked": result.filing_blocked,
+        "created_at": now_utc().isoformat(),
+    })
+
+    # Route high-risk / unresolved items to the human review queue.
+    if result.review_required:
+        await db.review_items.insert_one({
+            "review_id": uuid.uuid4().hex,
+            "user_id": user["user_id"],
+            "taxpayer_id": tp_id,
+            "document_id": None,
+            "title": f"Pub. 502 medical validation: {result.claim_id} ({result.status.value})",
+            "reason": result.missing_facts[0] if result.missing_facts else (
+                f"Potentially deductible ${result.calculation.potentially_deductible} "
+                f"requires professional review before any return-field update."
+            ),
+            "severity": "warning",
+            "status": "open",
+            "created_at": now_utc().isoformat(),
+        })
+
+    return result
+
+
+class ReviewerDecisionRequest(BaseModel):
+    decision: str  # approve | reject
+    rationale: Optional[str] = None
+
+
+async def _latest_claim_record(claim_id: str, user_id: str, taxpayer_id: str) -> Optional[dict]:
+    """Newest audit record for a claim — the effective status (validation, then
+    any approval/rejection events appended on top). Append-only, never mutated."""
+    return await db.validation_audit.find_one(
+        {"claim_id": claim_id, "user_id": user_id, "taxpayer_id": taxpayer_id},
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+
+
+async def _append_validation_audit(user_id: str, taxpayer_id: str, record: dict) -> str:
+    """Append a tamper-evident audit record. Each record's hash chains to the
+    previous tenant record so any in-place edit/deletion of history is
+    detectable by the verify pass."""
+    prev = await db.validation_audit.find_one(
+        {"user_id": user_id, "taxpayer_id": taxpayer_id},
+        {"record_hash": 1, "_id": 0},
+        sort=[("created_at", -1)],
+    )
+    prev_hash = (prev.get("record_hash") if prev else None) or GENESIS_HASH
+    record_hash = compute_record_hash(prev_hash, record)
+    record["prev_hash"] = prev_hash
+    record["record_hash"] = record_hash
+    await db.validation_audit.insert_one(record)
+    return record_hash
+
+
+@api_router.get("/validation/medical/{claim_id}")
+async def get_validation_claim(claim_id: str, user=Depends(get_current_user)):
+    tp_id = await get_active_taxpayer_id(user)
+    rec = await _latest_claim_record(claim_id, user["user_id"], tp_id)
+    if not rec:
+        raise HTTPException(404, "Claim not found")
+    return rec
+
+
+# Reviewer approval closes the AI-proposes -> checks -> human-approves loop. The
+# reviewer is the authenticated user (identity bound to the session); the model
+# cannot approve its own claims. Only a "potentially_supported" claim (all
+# deterministic checks passed) may be approved. Approval appends a new audit
+# event (never overwrites the original validation) and unblocks filing; a
+# rejection records the rationale and keeps filing blocked.
+@api_router.post("/validation/medical/{claim_id}/decision")
+async def reviewer_decision(claim_id: str, req: ReviewerDecisionRequest, user=Depends(get_current_user)):
+    if req.decision not in ("approve", "reject"):
+        raise HTTPException(400, "decision must be 'approve' or 'reject'")
+    tp_id = await get_active_taxpayer_id(user)
+
+    latest = await _latest_claim_record(claim_id, user["user_id"], tp_id)
+    if not latest:
+        raise HTTPException(404, "Claim not found")
+
+    base = latest
+    # If the latest record is itself an approval/rejection event, the user is
+    # acting on the prior validation — walk back to the validation event.
+    if latest.get("event_type") != "validation":
+        base = await db.validation_audit.find_one(
+            {"claim_id": claim_id, "user_id": user["user_id"], "taxpayer_id": tp_id,
+             "event_type": "validation"},
+            {"_id": 0}, sort=[("created_at", -1)],
+        )
+        if not base:
+            raise HTTPException(409, "No validation record to review")
+
+    # Prerequisite: only a claim that passed every deterministic check may be
+    # approved. Unsupported / contradicted / outdated claims cannot be approved.
+    if req.decision == "approve" and base["status"] != "potentially_supported":
+        raise HTTPException(
+            409,
+            f"Cannot approve a '{base['status']}' claim. Only 'potentially_supported' "
+            "claims (all deterministic checks passed) can be approved."
+        )
+
+    if req.decision == "approve":
+        new_status = "supported"
+        filing_blocked = False
+    else:
+        new_status = "unsupported"
+        filing_blocked = True
+
+    audit_id = uuid.uuid4().hex
+    now = now_utc().isoformat()
+    await _append_validation_audit(user["user_id"], tp_id, {
+        "audit_id": audit_id,
+        "event_type": "reviewer_decision",
+        "decision": req.decision,
+        "user_id": user["user_id"],
+        "taxpayer_id": tp_id,
+        "claim_id": claim_id,
+        "previous_status": base["status"],
+        "status": new_status,
+        "risk_tier": base.get("risk_tier", "high"),
+        "filing_blocked": filing_blocked,
+        "rationale": (req.rationale or "").strip() or None,
+        "reviewer_user_id": user["user_id"],
+        "reviewer_email": user.get("email"),
+        "calculation": base.get("calculation"),
+        "created_at": now,
+    })
+
+    return {
+        "ok": True,
+        "claim_id": claim_id,
+        "decision": req.decision,
+        "status": new_status,
+        "filing_blocked": filing_blocked,
+        "audit_event_id": audit_id,
+        "reviewer_email": user.get("email"),
+        "reviewed_at": now,
+    }
+
+
+@api_router.get("/validation/medical/history", response_model=List[dict])
+async def validation_history(user=Depends(get_current_user)):
+    tp_id = await get_active_taxpayer_id(user)
+    items = await db.validation_audit.find(
+        {"user_id": user["user_id"], "taxpayer_id": tp_id}, {"_id": 0}
+    ).sort("created_at", -1).to_list(100)
+    return items
+
+
+# Transparency: the versioned Pub. 502 medical threshold rules the engine uses.
+@api_router.get("/validation/rules/medical")
+async def medical_rules(user=Depends(get_current_user)):
+    return {
+        "rules": [
+            {
+                "tax_year": year,
+                "rate": str(r["rate"]),
+                "source": r["source"],
+                "revision": r["revision"],
+                "page_or_section": r["page_or_section"],
+                "hash": r["hash"],
+                "status": "approved",
+            }
+            for year, r in sorted(MEDICAL_RULES.items())
+        ],
+        "line_mapping": {
+            "line_1": "medical_and_dental_expenses",
+            "line_2": "adjusted_gross_income",
+            "line_3": "agi_times_rate",
+            "line_4": "line_1_minus_line_3_clamped_at_zero",
+        },
+        "note": "Threshold rate is versioned by tax year. The validator never "
+                "trusts an LLM-supplied rate; it confirms the rate against this "
+                "registry for the requested return year.",
+    }
+
+
+# Verify the tamper-evident audit chain for the active taxpayer. Walks every
+# validation_audit record in chronological order and reports the first break
+# (if any) plus per-record hash/link status. A valid chain means no record was
+# edited, deleted, or reordered after it was written.
+@api_router.get("/audit/chain/verify")
+async def verify_audit_chain(user=Depends(get_current_user)):
+    tp_id = await get_active_taxpayer_id(user)
+    records = await db.validation_audit.find(
+        {"user_id": user["user_id"], "taxpayer_id": tp_id}, {"_id": 0}
+    ).sort("created_at", 1).to_list(10000)
+    result = verify_chain(records)
+    return {
+        "valid": result["valid"],
+        "verified": result["verified"],
+        "total": result["total"],
+        "broken_at": result["broken_at"],
+        "tenant": {"user_id": user["user_id"], "taxpayer_id": tp_id},
+        "checked_at": now_utc().isoformat(),
+        "details": result["details"],
+    }
 
 
 # ---------- Rule Diff Viewer (prior-year deltas) ----------

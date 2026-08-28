@@ -1,0 +1,64 @@
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    # Platform-managed secrets (last, so dashboard values always win over the
+    # repo's backend/.env fallback values loaded by load_dotenv at runtime).
+    env_file:
+      - /run/base44/app.env
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    environment:
+      # Local infra overrides (the repo .env points at localhost).
+      - MONGO_URL=mongodb://mongo:27017
+      - DB_NAME=taxpilot_db
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    ports:
+      - "3000:8081"
+    environment:
+      # Public URL of the backend API (separate origin). Expo inlines EXPO_PUBLIC_*
+      # vars at bundle time; the real process env takes precedence over .env files.
+      - EXPO_PUBLIC_BACKEND_URL=https://8000-${BASE44_PUBLIC_HOST_SUFFIX}
+      - BASE44_PUBLIC_HOST_SUFFIX=${BASE44_PUBLIC_HOST_SUFFIX}
+      - EXPO_USE_FAST_RESOLVER=1
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8081/',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+    depends_on:
+      - backend
+
+volumes:
+  mongo_data:
+  frontend_node_modules:
