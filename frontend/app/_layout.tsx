@@ -1,9 +1,10 @@
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
-import { LogBox } from "react-native";
+import { LogBox, Platform } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { Analytics } from "@vercel/analytics/react";
 
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { AuthProvider } from "@/src/auth";
@@ -25,6 +26,7 @@ export default function RootLayout() {
       <SafeAreaProvider>
         <AuthProvider>
           <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: "#F7F6F2" } }} />
+          {Platform.OS === "web" && <Analytics />}
         </AuthProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
