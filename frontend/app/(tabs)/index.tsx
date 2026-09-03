@@ -142,6 +142,10 @@ export default function Dashboard() {
               <QuickCard testID="quick-demo" icon="play-circle" label="Try demo" onPress={() => router.push('/demo')} />
               <QuickCard testID="quick-vault" icon="folder-open" label={`Vault · ${status?.counts.documents || 0}`} onPress={() => router.push('/(tabs)/documents')} />
             </View>
+            <View style={styles.quickRow}>
+              <QuickCard testID="quick-validation" icon="shield-checkmark" label="Tax validator" onPress={() => router.push('/validation')} />
+              <QuickCard testID="quick-sources" icon="book" label="Sources" onPress={() => router.push('/sources')} />
+            </View>
 
             <Text style={styles.sectionTitle}>Refund estimate</Text>
             <View style={styles.refundCard} testID="refund-card">

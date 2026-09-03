@@ -28,6 +28,15 @@ from tax_validation.models import (
 )
 from tax_validation.rule_engine import validate_medical, MEDICAL_RULES
 from tax_validation.audit import compute_record_hash, verify_chain, GENESIS_HASH
+from tax_validation.citation_check import (
+    CitationCheckRequest,
+    CitationCheckResult,
+    AnswerCitation,
+    check_citations,
+)
+from tax_validation.source_registry import retrieve as retrieve_spans, registry_view
+from tax_validation.risk_tier import assess_risk
+from tax_validation.multi_state import get_state_rule, layered_assess, state_registry_view
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -996,15 +1005,14 @@ async def tax_chat(req: ChatRequest, user=Depends(get_current_user)):
     prefs = await db.preferences.find_one({"user_id": user["user_id"]}, {"_id": 0}) or {}
     tax_year = req.tax_year or prefs.get("tax_year", 2025)
 
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=f"chat-{user['user_id']}",
-        system_message=CHAT_SYSTEM,
-    ).with_model(provider, m)
-
     scoped_msg = f"[Tax year context: {tax_year}]\n\n{req.message}"
 
     try:
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"chat-{user['user_id']}",
+            system_message=CHAT_SYSTEM,
+        ).with_model(provider, m)
         resp = await chat.send_message(UserMessage(text=scoped_msg))
         text = resp if isinstance(resp, str) else str(resp)
         start, end = text.find("{"), text.rfind("}")
@@ -1034,6 +1042,33 @@ async def tax_chat(req: ChatRequest, user=Depends(get_current_user)):
         "tax_year": tax_year,
         "created_at": now_utc().isoformat(),
     })
+
+    # Deterministic citation-gap + hallucination check on the model's answer,
+    # grounded against the versioned source registry (not the model's claim).
+    _CAT_HINTS = [
+        ("medical", "medical_dental"), ("dental", "medical_dental"),
+        ("home office", "home_office"),
+        ("student loan", "student_loan_int"),
+        ("saver", "retirement_savers"), ("retirement savings", "retirement_savers"),
+        ("health insurance", "se_health_ins"),
+    ]
+    msg_lower = req.message.lower()
+    inferred_cat = next((cat for kw, cat in _CAT_HINTS if kw in msg_lower), "general")
+    spans = retrieve_spans(req.message, tax_year, inferred_cat)
+    cit_req = CitationCheckRequest(
+        answer=parsed.get("answer", ""),
+        citations=[AnswerCitation(**c) for c in parsed.get("citations", []) if isinstance(c, dict)],
+        tax_year=tax_year,
+        category=inferred_cat,
+        retrieved_spans=spans,
+    )
+    cit_check = check_citations(cit_req)
+    parsed["citation_check"] = cit_check.model_dump()
+    # The server-side check overrides the model's self-assessment: any gap or
+    # unsupported verdict forces review and high risk.
+    if cit_check.grounding_status != "grounded":
+        parsed["requires_review"] = True
+        parsed["risk_tier"] = "high"
 
     parsed["tax_year"] = tax_year
     return parsed
@@ -1423,6 +1458,76 @@ async def medical_rules(user=Depends(get_current_user)):
                 "trusts an LLM-supplied rate; it confirms the rate against this "
                 "registry for the requested return year.",
     }
+
+
+# Citation-gap & hallucination detector. Re-checks an LLM answer against the
+# retrieved source spans the server controlled (never the model's self-claim)
+# and returns a grounding verdict + hallucination flags.
+@api_router.post("/validation/citation-check", response_model=CitationCheckResult)
+async def citation_check_endpoint(req: CitationCheckRequest, user=Depends(get_current_user)):
+    if not req.retrieved_spans:
+        # If the caller did not supply spans, retrieve them from the registry so
+        # the check is never silently skipped.
+        req.retrieved_spans = retrieve_spans(req.answer, req.tax_year, req.category)
+    return check_citations(req)
+
+
+# Public view of the versioned source spans (metadata + preview, no full body).
+@api_router.get("/sources/spans")
+async def source_spans(user=Depends(get_current_user)):
+    return {"spans": registry_view(), "count": len(registry_view())}
+
+
+# Risk-tier escalation: a proposed item's tier + triggers + mandatory-review /
+# filing-block gate, derived from category, material amount, and any flags. High
+# risk always blocks filing until a reviewer approves.
+class RiskAssessmentRequest(BaseModel):
+    category: str
+    agi: Optional[float] = None
+    amount: Optional[float] = None
+    flags: List[str] = []
+
+
+@api_router.post("/validation/risk-assessment")
+async def risk_assessment(req: RiskAssessmentRequest, user=Depends(get_current_user)):
+    return assess_risk(req.category, req.agi, req.amount, req.flags)
+
+
+# Multi-state: layered federal <-> state rule objects.
+@api_router.get("/validation/state-rules")
+async def state_rules(state: str, tax_year: int, category: str = "medical_dental", user=Depends(get_current_user)):
+    rule = get_state_rule(state, tax_year, category)
+    if not rule:
+        raise HTTPException(404, f"No state rule for {state} / {tax_year} / {category}")
+    return rule
+
+
+@api_router.get("/validation/state-registry")
+async def state_registry(user=Depends(get_current_user)):
+    return {"states": state_registry_view()}
+
+
+# Layer a federal medical validation result with the state rule for the same
+# year/category, returning the effective status + reviewer caveat.
+class LayeredStateRequest(BaseModel):
+    claim_id: str
+    state: str
+
+
+@api_router.post("/validation/medical/layered-state")
+async def medical_layered_state(req: LayeredStateRequest, user=Depends(get_current_user)):
+    tp_id = await get_active_taxpayer_id(user)
+    base = await _latest_claim_record(req.claim_id, user["user_id"], tp_id)
+    if not base:
+        raise HTTPException(404, "Claim not found")
+    federal = {
+        "claim_id": base.get("claim_id"),
+        "category": base.get("category", "medical_dental"),
+        "status": base.get("status"),
+        "risk_tier": base.get("risk_tier"),
+        "filing_blocked": base.get("filing_blocked"),
+    }
+    return layered_assess(federal, req.state, base.get("tax_year", 2025))
 
 
 # Verify the tamper-evident audit chain for the active taxpayer. Walks every
