@@ -24,6 +24,19 @@ type CitationRes = {
   verified_citations: { source: string; status: string }[];
   unsupported_numbers: string[]; requires_review: boolean; risk_tier: string; explanation: string;
 };
+type RiskRes = {
+  category: string; risk_tier: string; triggers: string[];
+  review_required: boolean; filing_blocked: boolean; note: string;
+};
+type LayeredRes = {
+  federal: { claim_id?: string; status?: string; filing_blocked?: boolean };
+  state: { state_name: string; conformity: string; floor: string; notes: string } | null;
+  state_status: string; effective_status: string; note: string;
+};
+type StateRule = {
+  state: string; state_name: string; conformity: string; floor: string;
+  follows_federal: boolean; notes: string; tax_year: number; category: string;
+};
 
 const TAX_YEARS = [2025, 2024, 2023, 2026];
 const CATS = [
@@ -31,6 +44,20 @@ const CATS = [
   { id: 'retirement_savers', label: 'Retirement savers' },
   { id: 'student_loan_int', label: 'Student loan int.' },
   { id: 'home_office', label: 'Home office' },
+];
+const RISK_CATS = [
+  ...CATS,
+  { id: 'crypto', label: 'Crypto' },
+  { id: 'foreign_assets', label: 'Foreign assets' },
+  { id: 'rental_real_estate', label: 'Rental / RE' },
+  { id: 'k1_passthrough', label: 'K-1 / passthrough' },
+  { id: 'aca_premium_credit', label: 'ACA credit' },
+  { id: 'canceled_debt', label: 'Canceled debt' },
+];
+const STATES = [
+  { code: 'CA', name: 'California' },
+  { code: 'NY', name: 'New York' },
+  { code: 'OR', name: 'Oregon' },
 ];
 
 const STATUS_COLOR: Record<string, string> = {
@@ -67,6 +94,19 @@ export default function ValidationScreen() {
 
   // audit chain
   const [chain, setChain] = useState<ChainVerify | null>(null);
+
+  // risk assessment
+  const [riskCat, setRiskCat] = useState('medical_dental');
+  const [riskAgi, setRiskAgi] = useState('100000');
+  const [riskAmt, setRiskAmt] = useState('12500');
+  const [riskRes, setRiskRes] = useState<RiskRes | null>(null);
+  const [riskBusy, setRiskBusy] = useState(false);
+
+  // multi-state layered assessment
+  const [stateCode, setStateCode] = useState('CA');
+  const [stateRule, setStateRule] = useState<StateRule | null>(null);
+  const [layered, setLayered] = useState<LayeredRes | null>(null);
+  const [stateBusy, setStateBusy] = useState(false);
 
   const loadChain = useCallback(async () => {
     try { setChain(await api<ChainVerify>('/audit/chain/verify')); } catch {}
@@ -121,6 +161,40 @@ export default function ValidationScreen() {
       setCiteRes(r);
     } catch (e: any) { setError(e.message || 'Citation check failed'); }
     setCiteBusy(false);
+  }
+
+  async function assessRisk() {
+    setRiskBusy(true); setRiskRes(null);
+    try {
+      const r = await api<RiskRes>('/validation/risk-assessment', {
+        method: 'POST',
+        body: JSON.stringify({
+          category: riskCat,
+          agi: Number(riskAgi) || 0,
+          amount: Number(riskAmt) || 0,
+          flags: [],
+        }),
+      });
+      setRiskRes(r);
+    } catch (e: any) { setError(e.message || 'Risk assessment failed'); }
+    setRiskBusy(false);
+  }
+
+  async function layerState() {
+    if (!result) return;
+    setStateBusy(true); setLayered(null); setStateRule(null);
+    try {
+      const r = await api<LayeredRes>('/validation/medical/layered-state', {
+        method: 'POST',
+        body: JSON.stringify({ claim_id: result.claim_id, state: stateCode }),
+      });
+      setLayered(r);
+      try {
+        const sr = await api<StateRule>(`/validation/state-rules?state=${stateCode}&tax_year=${taxYear}&category=medical_dental`);
+        setStateRule(sr);
+      } catch {}
+    } catch (e: any) { setError(e.message || 'State assessment failed'); }
+    setStateBusy(false);
   }
 
   const showStatus = effective?.status || result?.status || '';
@@ -314,6 +388,101 @@ export default function ValidationScreen() {
           ) : <ActivityIndicator color={THEME.brandPrimary} />}
         </View>
 
+        {/* --- Risk-tier assessment --- */}
+        <Text style={[styles.sectionTitle, { marginTop: SPACING.xl }]}>6 · Risk-tier escalation</Text>
+        <View style={styles.card}>
+          <Text style={styles.label}>Category</Text>
+          <View style={styles.chipRow}>
+            {RISK_CATS.map(c => (
+              <Pressable key={c.id} style={[styles.chip, riskCat === c.id && styles.chipActive]} onPress={() => setRiskCat(c.id)}>
+                <Text style={[styles.chipText, riskCat === c.id && styles.chipTextActive]}>{c.label}</Text>
+              </Pressable>
+            ))}
+          </View>
+          <LabeledInput label="AGI" value={riskAgi} onChange={setRiskAgi} testID="risk-agi" prefix="$" />
+          <LabeledInput label="Item amount" value={riskAmt} onChange={setRiskAmt} testID="risk-amt" prefix="$" />
+          <Pressable style={styles.secondaryBtn} onPress={assessRisk} disabled={riskBusy} testID="risk-btn">
+            {riskBusy ? <ActivityIndicator color={THEME.brandPrimary} /> : (
+              <><Ionicons name="flag" size={16} color={THEME.brandPrimary} /><Text style={styles.secondaryBtnText}>Assess risk</Text></>
+            )}
+          </Pressable>
+
+          {riskRes ? (
+            <View style={styles.riskResBox} testID="risk-result">
+              <View style={styles.resultHead}>
+                <View style={[styles.tierPill, { backgroundColor: riskRes.risk_tier === 'high' ? THEME.error + '18' : riskRes.risk_tier === 'medium' ? THEME.warning + '18' : THEME.brandTertiary }]}>
+                  <Text style={[styles.tierText, { color: riskRes.risk_tier === 'high' ? THEME.error : riskRes.risk_tier === 'medium' ? THEME.warning : THEME.brandPrimary }]}>{riskRes.risk_tier} risk</Text>
+                </View>
+                <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
+                  <Ionicons name={riskRes.filing_blocked ? 'lock-closed' : 'lock-open'} size={14} color={riskRes.filing_blocked ? THEME.error : THEME.success} />
+                  <Text style={[styles.metaText, { color: riskRes.filing_blocked ? THEME.error : THEME.success }]}>
+                    {riskRes.filing_blocked ? 'Filing blocked' : 'Not blocked'}
+                  </Text>
+                </View>
+              </View>
+              {riskRes.triggers.length > 0 ? (
+                <View style={styles.flagsBox}>
+                  <Text style={styles.flagsTitle}>Triggers</Text>
+                  {riskRes.triggers.map(t => (
+                    <View key={t} style={styles.flagRow}><Ionicons name="flash" size={12} color={THEME.warning} /><Text style={styles.flagText}>{t}</Text></View>
+                  ))}
+                </View>
+              ) : null}
+              <Text style={styles.riskNote}>{riskRes.note}</Text>
+            </View>
+          ) : null}
+        </View>
+
+        {/* --- Multi-state layered assessment --- */}
+        <Text style={[styles.sectionTitle, { marginTop: SPACING.xl }]}>7 · Multi-state layered check</Text>
+        <View style={styles.card} testID="state-card">
+          <Text style={styles.label}>State</Text>
+          <View style={styles.chipRow}>
+            {STATES.map(s => (
+              <Pressable key={s.code} style={[styles.chip, stateCode === s.code && styles.chipActive]} onPress={() => setStateCode(s.code)}>
+                <Text style={[styles.chipText, stateCode === s.code && styles.chipTextActive]}>{s.code}</Text>
+              </Pressable>
+            ))}
+          </View>
+          {result ? (
+            <Text style={styles.stateClaimRef}>Layering claim <Text style={styles.stateClaimId}>{result.claim_id}</Text> ({effective?.status || result.status}) with {stateCode} rules</Text>
+          ) : (
+            <Text style={styles.stateHint}>Run a medical validation (section 1) first to layer a federal result with state rules.</Text>
+          )}
+          <Pressable style={[styles.secondaryBtn, !result && { opacity: 0.4 }]} onPress={layerState} disabled={stateBusy || !result} testID="layer-btn">
+            {stateBusy ? <ActivityIndicator color={THEME.brandPrimary} /> : (
+              <><Ionicons name="git-network" size={16} color={THEME.brandPrimary} /><Text style={styles.secondaryBtnText}>Layer federal + state</Text></>
+            )}
+          </Pressable>
+
+          {stateRule ? (
+            <View style={styles.stateRuleBox}>
+              <Text style={styles.stateRuleTitle}>{stateRule.state_name} rule</Text>
+              <View style={styles.stateRuleRow}><Text style={styles.stateRuleLabel}>Conformity</Text><Text style={styles.stateRuleVal}>{stateRule.conformity}</Text></View>
+              <View style={styles.stateRuleRow}><Text style={styles.stateRuleLabel}>AGI floor</Text><Text style={styles.stateRuleVal}>{stateRule.floor}</Text></View>
+              <View style={styles.stateRuleRow}><Text style={styles.stateRuleLabel}>Follows federal</Text><Text style={styles.stateRuleVal}>{stateRule.follows_federal ? 'Yes' : 'No'}</Text></View>
+              <Text style={styles.stateRuleNotes}>{stateRule.notes}</Text>
+            </View>
+          ) : null}
+
+          {layered ? (
+            <View style={styles.layeredBox} testID="layered-result">
+              <View style={styles.resultHead}>
+                <View style={[styles.statusBadge, { backgroundColor: (layered.state_status === 'conforms' ? THEME.success : layered.state_status === 'no_rule' ? THEME.error : THEME.warning) + '22' }]}>
+                  <Ionicons name={layered.state_status === 'conforms' ? 'checkmark-circle' : 'alert-circle'} size={14} color={layered.state_status === 'conforms' ? THEME.success : layered.state_status === 'no_rule' ? THEME.error : THEME.warning} />
+                  <Text style={[styles.statusText, { color: layered.state_status === 'conforms' ? THEME.success : layered.state_status === 'no_rule' ? THEME.error : THEME.warning }]}>
+                    {layered.state_status === 'conforms' ? 'State conforms' : layered.state_status === 'no_rule' ? 'No state rule' : 'State override'}
+                  </Text>
+                </View>
+                <View style={[styles.tierPill, { backgroundColor: layered.effective_status === 'potentially_supported' ? THEME.brandTertiary : THEME.warning + '18' }]}>
+                  <Text style={[styles.tierText, { color: layered.effective_status === 'potentially_supported' ? THEME.brandPrimary : THEME.warning }]}>{layered.effective_status}</Text>
+                </View>
+              </View>
+              <Text style={styles.layeredNote}>{layered.note}</Text>
+            </View>
+          ) : null}
+        </View>
+
         <View style={{ height: 60 }} />
       </ScrollView>
     </SafeAreaView>
@@ -426,4 +595,17 @@ const styles = StyleSheet.create({
   chainRow: { flexDirection: 'row', gap: SPACING.md, alignItems: 'center' },
   chainTitle: { fontSize: 15, fontWeight: '700', color: THEME.onSurface },
   chainSub: { fontSize: 12, color: THEME.onSurfaceTertiary, marginTop: 2 },
+  riskResBox: { marginTop: SPACING.md, backgroundColor: THEME.surface, borderRadius: RADIUS.md, padding: SPACING.md },
+  riskNote: { fontSize: 12, color: THEME.onSurfaceTertiary, marginTop: SPACING.sm, lineHeight: 17 },
+  stateClaimRef: { fontSize: 12, color: THEME.onSurfaceTertiary, marginTop: SPACING.sm },
+  stateClaimId: { fontWeight: '600', color: THEME.onSurface },
+  stateHint: { fontSize: 12, color: THEME.onSurfaceTertiary, marginTop: SPACING.sm, fontStyle: 'italic' },
+  stateRuleBox: { marginTop: SPACING.md, backgroundColor: THEME.surface, borderRadius: RADIUS.md, padding: SPACING.md, borderWidth: 1, borderColor: THEME.border },
+  stateRuleTitle: { fontSize: 13, fontWeight: '700', color: THEME.onSurface, marginBottom: SPACING.sm },
+  stateRuleRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3 },
+  stateRuleLabel: { fontSize: 12, color: THEME.onSurfaceTertiary },
+  stateRuleVal: { fontSize: 12, fontWeight: '600', color: THEME.onSurface },
+  stateRuleNotes: { fontSize: 11, color: THEME.onSurfaceTertiary, marginTop: SPACING.xs, lineHeight: 15 },
+  layeredBox: { marginTop: SPACING.md, backgroundColor: THEME.surface, borderRadius: RADIUS.md, padding: SPACING.md },
+  layeredNote: { fontSize: 12, color: THEME.onSurfaceTertiary, marginTop: SPACING.sm, lineHeight: 17 },
 });
